@@ -21,6 +21,11 @@
     "@mariozechner/pi-coding-agent": "*",
     "@sinclair/typebox": "*"
   },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "build": "echo 'pi compiles TS directly'",
+    "clean": "echo 'nothing to clean'"
+  },
   "devDependencies": {
     "typescript": "^6.0.2"
   }
