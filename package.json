@@ -1,6 +1,7 @@
 {
   "name": "pi-extensions",
   "private": true,
+  "packageManager": "bun@1.2.10",
   "workspaces": ["packages/*"],
   "scripts": {
     "check": "turbo check",
