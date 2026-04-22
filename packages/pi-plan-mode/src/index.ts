@@ -26,18 +26,17 @@ const PLAN_MODE_TOOLS = [
 	"read", "bash", "grep", "find", "ls",           // read-only exploration
 	"subagent", "subagent_status",                   // subagent orchestration
 	"questionnaire",                                 // clarifying questions
-	"TaskList", "TaskGet",                           // view existing tasks
+	"todo_write",                                    // task tracking
 ];
 
-// pi-tasks tool names used for detecting the extension
-const TASK_TOOLS = ["TaskCreate", "TaskList", "TaskGet", "TaskUpdate", "TaskExecute"];
+const TODO_TOOL = "todo_write";
 
 export default function planModeExtension(pi: ExtensionAPI): void {
 	let planModeEnabled = false;
 	let planFilePath = "";
 	let planDescription = "";
 	let planSteps: PlanStep[] = [];
-	let hasTasksExtension = false;
+	let hasTodoExtension = false;
 
 	// ---- Helpers ----
 
@@ -61,11 +60,11 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		}
 	}
 
-	function detectTasksExtension(): void {
+	function detectTodoExtension(): void {
 		try {
-			hasTasksExtension = pi.getAllTools().some((t) => TASK_TOOLS.includes(t.name));
+			hasTodoExtension = pi.getAllTools().some((t) => t.name === TODO_TOOL);
 		} catch {
-			hasTasksExtension = false;
+			hasTodoExtension = false;
 		}
 	}
 
@@ -146,9 +145,9 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 
 		// Show execution menu
 		const options: string[] = [];
-		if (hasTasksExtension) {
-			options.push("Execute with main agent (fresh context + plan + task tracking)");
-			options.push("Execute with subagent (worker + task tracking)");
+		if (hasTodoExtension) {
+			options.push("Execute with main agent (fresh context + plan + todo tracking)");
+			options.push("Execute with subagent (worker + todo tracking)");
 		} else {
 			options.push("Execute with main agent");
 			options.push("Execute with subagent (worker)");
@@ -187,16 +186,16 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		updateStatus(ctx);
 		persistState();
 
-		const taskInstructions = buildTaskCreationInstructions(content);
+		const todoInstructions = buildTodoInstructions(content);
 
 		pi.sendMessage(
 			{
 				customType: "plan-execute",
 				content: `Execute the following implementation plan. The plan file is at \`${planFilePath}\`.
 
-${taskInstructions}
+${todoInstructions}
 
-Read the plan file, then execute each task in order. Mark each task as \`in_progress\` when you start it and \`completed\` when done.
+Read the plan file, then execute each step in order. Use todo_write to update progress — mark each task as \`in_progress\` when starting and \`completed\` when done.
 
 Focus only on the plan — ignore previous exploration context.`,
 				display: true,
@@ -220,16 +219,16 @@ Focus only on the plan — ignore previous exploration context.`,
 		updateStatus(ctx);
 		persistState();
 
-		const taskInstructions = buildTaskCreationInstructions(content);
+		const todoInstructions = buildTodoInstructions(content);
 
 		pi.sendMessage(
 			{
 				customType: "plan-execute",
-				content: `${taskInstructions}
+				content: `${todoInstructions}
 
-After creating the tasks, delegate execution to a worker subagent:
+After creating the todos, delegate execution to a worker subagent:
 
-subagent({ agent: "worker", task: "Execute the implementation plan at ${planFilePath}. Read the plan file and implement each step. Use TaskUpdate to mark tasks as in_progress when starting and completed when done.\\n\\nOriginal request: ${escapeForTemplate(planDescription)}" })
+subagent({ agent: "worker", task: "Execute the implementation plan at ${planFilePath}. Read the plan file and implement each step. Use todo_write to update the todo list — mark each task as in_progress when starting and completed when done.\\n\\nOriginal request: ${escapeForTemplate(planDescription)}" })
 
 Monitor the subagent progress.`,
 				display: true,
@@ -241,20 +240,19 @@ Monitor the subagent progress.`,
 	/**
 	 * Build instructions for creating pi-tasks from plan steps.
 	 */
-	function buildTaskCreationInstructions(planContent: string): string {
-		if (!hasTasksExtension || planSteps.length === 0) {
+	function buildTodoInstructions(planContent: string): string {
+		if (!hasTodoExtension || planSteps.length === 0) {
 			return `**Plan file:** \`${planFilePath}\``;
 		}
 
-		const taskCalls = planSteps
-			.map((s, i) => {
-				const subject = escapeForTemplate(s.text);
-				const desc = escapeForTemplate(s.description);
-				return `${i + 1}. TaskCreate({ subject: "${subject}", description: "Step ${s.step}: ${desc}", activeForm: "${subject}" })`;
+		const todoItems = planSteps
+			.map((s) => {
+				const content = escapeForTemplate(s.text);
+				return `  { content: "${content}", status: "pending", activeForm: "${content}" }`;
 			})
-			.join("\n");
+			.join(",\n");
 
-		return `First, create tasks for tracking progress:\n\n${taskCalls}\n\nSet up dependencies so each task is blocked by the previous one (except the first).`;
+		return `First, create a todo list to track progress:\n\ntodo_write({ todos: [\n${todoItems}\n] })`;
 	}
 
 	function escapeForTemplate(s: string): string {
@@ -272,7 +270,7 @@ Monitor the subagent progress.`,
 	pi.registerCommand("plan", {
 		description: "Toggle plan mode, or start planning: /plan <task description>",
 		handler: async (args, ctx) => {
-			detectTasksExtension();
+			detectTodoExtension();
 
 			if (args?.trim()) {
 				planDescription = args.trim();
@@ -292,7 +290,7 @@ Monitor the subagent progress.`,
 	pi.registerShortcut(Key.ctrlAlt("p"), {
 		description: "Toggle plan mode",
 		handler: async (ctx) => {
-			detectTasksExtension();
+			detectTodoExtension();
 			if (planModeEnabled) {
 				disablePlanMode(ctx);
 			} else {
@@ -370,7 +368,7 @@ Restrictions:
 	// ---- Session Restore ----
 
 	pi.on("session_start", async (_event, ctx) => {
-		detectTasksExtension();
+		detectTodoExtension();
 
 		if (pi.getFlag("plan") === true) {
 			planModeEnabled = true;
