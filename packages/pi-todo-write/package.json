@@ -1,0 +1,23 @@
+{
+  "name": "pi-todo-write",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "TodoWrite tool for pi – structured task list management for coding sessions",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "author": "Milko Slavov <milko.slavov@gmail.com>",
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "scripts": {
+    "clean": "echo 'nothing to clean'",
+    "build": "echo 'nothing to build'",
+    "check": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-tui": "*",
+    "@sinclair/typebox": "*"
+  }
+}
