@@ -1,0 +1,25 @@
+{
+  "name": "pi-plan-mode",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Plan mode extension for pi – structured planning via scout/planner subagents with task tracking",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "author": "Milko Slavov <milko.slavov@gmail.com>",
+  "pi": {
+    "extensions": ["./src/index.ts"]
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "build": "echo 'pi compiles TS directly'",
+    "clean": "echo 'nothing to clean'"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-tui": "*"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.2"
+  }
+}
