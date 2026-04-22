@@ -1,0 +1,14 @@
+{
+  "name": "pi-extensions",
+  "private": true,
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "check": "turbo check",
+    "build": "turbo build",
+    "clean": "turbo clean"
+  },
+  "devDependencies": {
+    "turbo": "^2.9.6",
+    "typescript": "^6.0.2"
+  }
+}
