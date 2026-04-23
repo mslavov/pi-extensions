@@ -11,5 +11,11 @@
   "devDependencies": {
     "turbo": "^2.9.6",
     "typescript": "^6.0.2"
+  },
+  "dependencies": {
+    "@mariozechner/pi-agent-core": "^0.69.0",
+    "@mariozechner/pi-ai": "^0.69.0",
+    "@mariozechner/pi-coding-agent": "^0.69.0",
+    "@mariozechner/pi-tui": "^0.69.0"
   }
 }

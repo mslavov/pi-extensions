@@ -1,0 +1,23 @@
+{
+  "name": "pi-autocomplete",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Include gitignored files in pi's @ file autocomplete",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "pi": {
+    "extensions": ["./src/index.ts"]
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "build": "echo 'pi compiles TS directly'",
+    "clean": "echo 'nothing to clean'"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.2"
+  }
+}
