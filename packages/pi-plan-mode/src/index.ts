@@ -18,8 +18,40 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { Api, Model } from "@mariozechner/pi-ai";
 import { Key } from "@mariozechner/pi-tui";
 import { extractPlanSteps, isSafeCommand, type PlanStep } from "./utils.js";
+
+type ModelTier = "fast" | "medium" | "best";
+
+function selectModelByTier(models: Model<Api>[], tier: ModelTier): string {
+	if (models.length === 0) {
+		const defaults: Record<ModelTier, string> = {
+			fast: "anthropic/claude-haiku-4-5",
+			medium: "anthropic/claude-sonnet-4-6",
+			best: "anthropic/claude-opus-4-6",
+		};
+		return defaults[tier];
+	}
+
+	const sorted = [...models].sort(
+		(a, b) => (a.cost.input + a.cost.output) - (b.cost.input + b.cost.output),
+	);
+
+	let pick: Model<Api>;
+	if (tier === "fast") {
+		pick = sorted[0];
+	} else if (tier === "best") {
+		const reasoningModels = sorted.filter((m) => m.reasoning);
+		pick = reasoningModels.length > 0
+			? reasoningModels[reasoningModels.length - 1]
+			: sorted[sorted.length - 1];
+	} else {
+		pick = sorted[Math.floor(sorted.length / 2)];
+	}
+
+	return `${pick.provider}/${pick.id}`;
+}
 
 // Tools allowed during planning phase (read-only + subagent orchestration)
 const PLAN_MODE_TOOLS = [
@@ -220,6 +252,7 @@ Focus only on the plan — ignore previous exploration context.`,
 		persistState();
 
 		const todoInstructions = buildTodoInstructions(content);
+		const implementModel = selectModelByTier(ctx.modelRegistry.getAvailable(), "medium");
 
 		pi.sendMessage(
 			{
@@ -228,7 +261,7 @@ Focus only on the plan — ignore previous exploration context.`,
 
 After creating the todos, delegate execution to a worker subagent:
 
-subagent({ agent: "worker", task: "Execute the implementation plan at ${planFilePath}. Read the plan file and implement each step. Use todo_write to update the todo list — mark each task as in_progress when starting and completed when done.\\n\\nOriginal request: ${escapeForTemplate(planDescription)}" })
+subagent({ agent: "worker", task: "Execute the implementation plan at ${planFilePath}. Read the plan file and implement each step. Use todo_write to update the todo list — mark each task as in_progress when starting and completed when done.\\n\\nOriginal request: ${escapeForTemplate(planDescription)}", model: "${implementModel}" })
 
 Monitor the subagent progress.`,
 				display: true,
@@ -314,8 +347,12 @@ Monitor the subagent progress.`,
 	});
 
 	// Inject planning instructions
-	pi.on("before_agent_start", async () => {
+	pi.on("before_agent_start", async (_event, ctx) => {
 		if (!planModeEnabled) return;
+
+		const available = ctx.modelRegistry.getAvailable();
+		const scoutModel = selectModelByTier(available, "fast");
+		const plannerModel = selectModelByTier(available, "best");
 
 		return {
 			message: {
@@ -325,10 +362,10 @@ You are in plan mode. Your job is to create an implementation plan using subagen
 
 Steps:
 1. Run the **scout** subagent to explore the codebase and understand the architecture:
-   subagent({ agent: "scout", task: "Explore the codebase for: ${escapeForTemplate(planDescription || "the user's request")}. Be thorough — trace imports, read key files, check tests and types.", model: "anthropic/claude-sonnet-4" })
+   subagent({ agent: "scout", task: "Explore the codebase for: ${escapeForTemplate(planDescription || "the user's request")}. Be thorough — trace imports, read key files, check tests and types.", model: "${scoutModel}", output: false })
 
 2. Once scout completes, run the **planner** subagent to create a detailed plan. Pass the scout's findings and save the plan to the designated file:
-   subagent({ agent: "planner", task: "Create a detailed implementation plan for: ${escapeForTemplate(planDescription || "the user's request")}. Scout findings: {previous}", output: "${planFilePath}", model: "anthropic/claude-opus-4-6" })
+   subagent({ agent: "planner", task: "Create a detailed implementation plan for: ${escapeForTemplate(planDescription || "the user's request")}. Scout findings: {previous}", output: "${planFilePath}", model: "${plannerModel}" })
 
 3. After the planner finishes, confirm the plan has been written.
 

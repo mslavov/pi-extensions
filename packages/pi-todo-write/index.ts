@@ -1,6 +1,6 @@
 import { StringEnum } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@mariozechner/pi-coding-agent";
-import { matchesKey, Text, truncateToWidth } from "@mariozechner/pi-tui";
+import { Key, matchesKey, Text, truncateToWidth } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { DESCRIPTION, PROMPT } from "./prompt.js";
 
@@ -55,10 +55,11 @@ function todoLabel(todo: TodoItem, theme: Theme): string {
 	}
 }
 
-class TodoListComponent {
+class TodoListOverlay {
 	private todos: TodoItem[];
 	private theme: Theme;
 	private onClose: () => void;
+	private scrollOffset = 0;
 	private cachedWidth?: number;
 	private cachedLines?: string[];
 
@@ -69,8 +70,16 @@ class TodoListComponent {
 	}
 
 	handleInput(data: string): void {
-		if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
+		if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || matchesKey(data, Key.ctrlShift("t"))) {
 			this.onClose();
+		} else if (matchesKey(data, Key.up) || matchesKey(data, "k")) {
+			if (this.scrollOffset > 0) {
+				this.scrollOffset--;
+				this.invalidate();
+			}
+		} else if (matchesKey(data, Key.down) || matchesKey(data, "j")) {
+			this.scrollOffset++;
+			this.invalidate();
 		}
 	}
 
@@ -83,32 +92,43 @@ class TodoListComponent {
 		const th = this.theme;
 
 		lines.push("");
-		const title = th.fg("accent", " Todos ");
+		const done = this.todos.filter((t) => t.status === "completed").length;
+		const title = th.fg("accent", ` Todos ${th.fg("muted", `${done}/${this.todos.length}`)} `);
 		const headerLine =
-			th.fg("borderMuted", "─".repeat(3)) + title + th.fg("borderMuted", "─".repeat(Math.max(0, width - 10)));
+			th.fg("borderMuted", "─".repeat(3)) + title + th.fg("borderMuted", "─".repeat(Math.max(0, width - 18)));
 		lines.push(truncateToWidth(headerLine, width));
 		lines.push("");
 
 		if (this.todos.length === 0) {
 			lines.push(truncateToWidth(`  ${th.fg("dim", "No todos yet.")}`, width));
 		} else {
-			const done = this.todos.filter((t) => t.status === "completed").length;
-			const inProgress = this.todos.find((t) => t.status === "in_progress");
-			lines.push(truncateToWidth(`  ${th.fg("muted", `${done}/${this.todos.length} completed`)}`, width));
-			if (inProgress) {
-				lines.push(truncateToWidth(`  ${th.fg("accent", `▸ ${inProgress.activeForm}`)}`, width));
-			}
-			lines.push("");
+			// Clamp scroll offset
+			const maxScroll = Math.max(0, this.todos.length - 10);
+			if (this.scrollOffset > maxScroll) this.scrollOffset = maxScroll;
 
-			for (const todo of this.todos) {
+			const visible = this.todos.slice(this.scrollOffset, this.scrollOffset + 10);
+			for (let i = 0; i < visible.length; i++) {
+				const todo = visible[i];
+				const idx = this.scrollOffset + i + 1;
+				const num = th.fg("dim", `${String(idx).padStart(2)}.`);
 				const icon = statusIcon(todo.status, th);
 				const label = todoLabel(todo, th);
-				lines.push(truncateToWidth(`  ${icon} ${label}`, width));
+				lines.push(truncateToWidth(`  ${num} ${icon} ${label}`, width));
+			}
+
+			if (this.todos.length > 10) {
+				lines.push("");
+				lines.push(
+					truncateToWidth(
+						`  ${th.fg("dim", `Showing ${this.scrollOffset + 1}-${Math.min(this.scrollOffset + 10, this.todos.length)} of ${this.todos.length} · ↑/↓ to scroll`)}`,
+						width,
+					),
+				);
 			}
 		}
 
 		lines.push("");
-		lines.push(truncateToWidth(`  ${th.fg("dim", "Press Escape to close")}`, width));
+		lines.push(truncateToWidth(`  ${th.fg("dim", "Esc or Ctrl+T to close")}`, width));
 		lines.push("");
 
 		this.cachedWidth = width;
@@ -124,6 +144,33 @@ class TodoListComponent {
 
 export default function (pi: ExtensionAPI) {
 	let todos: TodoItem[] = [];
+	let currentCtx: ExtensionContext | undefined;
+
+	function updateWidget() {
+		if (!currentCtx) return;
+		const ctx = currentCtx;
+
+		if (todos.length === 0) {
+			ctx.ui.setWidget("todo-status", undefined);
+			return;
+		}
+
+		const th = ctx.ui.theme;
+		const done = todos.filter((t) => t.status === "completed").length;
+		const inProgress = todos.find((t) => t.status === "in_progress");
+
+		const parts: string[] = [];
+		parts.push(th.fg("muted", "📋"));
+		parts.push(th.fg("accent", `${done}/${todos.length}`));
+		if (inProgress) {
+			parts.push(th.fg("accent", "▸ ") + th.fg("text", inProgress.activeForm));
+		} else if (done === todos.length) {
+			parts.push(th.fg("success", "✓ All done"));
+		}
+		parts.push(th.fg("dim", "Ctrl+Shift+T"));
+
+		ctx.ui.setWidget("todo-status", [parts.join("  ")]);
+	}
 
 	const reconstructState = (ctx: ExtensionContext) => {
 		todos = [];
@@ -138,14 +185,35 @@ export default function (pi: ExtensionAPI) {
 		}
 	};
 
-	pi.on("session_start", async (_event, ctx) => reconstructState(ctx));
-	pi.on("session_tree", async (_event, ctx) => reconstructState(ctx));
+	pi.on("session_start", async (_event, ctx) => {
+		currentCtx = ctx;
+		reconstructState(ctx);
+		updateWidget();
+	});
 
-	// Inject the full prompt into the system prompt
+	pi.on("session_tree", async (_event, ctx) => {
+		currentCtx = ctx;
+		reconstructState(ctx);
+		updateWidget();
+	});
+
 	pi.on("before_agent_start", async (event, _ctx) => {
 		return {
 			systemPrompt: event.systemPrompt + "\n\n" + PROMPT,
 		};
+	});
+
+	pi.registerShortcut(Key.ctrlShift("t"), {
+		description: "Toggle todo list",
+		handler: async (ctx) => {
+			if (todos.length === 0) {
+				ctx.ui.notify("No todos yet", "info");
+				return;
+			}
+			await ctx.ui.custom<void>((_tui, theme, _kb, done) => {
+				return new TodoListOverlay(todos, theme, () => done());
+			});
+		},
 	});
 
 	pi.registerTool({
@@ -167,13 +235,13 @@ export default function (pi: ExtensionAPI) {
 			const oldTodos = [...todos];
 			const newTodos = [...params.todos];
 
-			// Clear list if all completed
 			const allCompleted = newTodos.length > 0 && newTodos.every((t) => t.status === "completed");
 			if (allCompleted) {
 				newTodos.length = 0;
 			}
 
 			todos = newTodos;
+			updateWidget();
 
 			return {
 				content: [
@@ -188,44 +256,33 @@ export default function (pi: ExtensionAPI) {
 
 		renderCall(args, theme, _context) {
 			const items = args.todos ?? [];
+			const done = items.filter((t: TodoItem) => t.status === "completed").length;
 			const inProgress = items.find((t: TodoItem) => t.status === "in_progress");
 			let text = theme.fg("toolTitle", theme.bold("TodoWrite "));
-			text += theme.fg("muted", `${items.length} item(s)`);
+			text += theme.fg("muted", `${done}/${items.length}`);
 			if (inProgress) {
-				text += " " + theme.fg("accent", `▸ ${inProgress.activeForm}`);
+				text += "  " + theme.fg("accent", `▸ ${inProgress.activeForm}`);
 			}
 			return new Text(text, 0, 0);
 		},
 
-		renderResult(result, { expanded }, theme, _context) {
+		renderResult(result, _options, theme, _context) {
 			const details = result.details as TodoDetails | undefined;
 			if (!details) {
 				const text = result.content[0];
 				return new Text(text?.type === "text" ? text.text : "", 0, 0);
 			}
 
-			const items = details.newTodos;
-			if (items.length === 0) {
+			if (details.newTodos.length === 0) {
 				return new Text(theme.fg("success", "✓ All tasks completed"), 0, 0);
 			}
 
-			const done = items.filter((t) => t.status === "completed").length;
-			const current = items.find((t) => t.status === "in_progress");
-			let text = theme.fg("muted", `${done}/${items.length} completed`);
+			const done = details.newTodos.filter((t) => t.status === "completed").length;
+			const current = details.newTodos.find((t) => t.status === "in_progress");
+			let text = theme.fg("muted", `${done}/${details.newTodos.length} completed`);
 			if (current) {
-				text += " " + theme.fg("accent", `▸ ${current.activeForm}`);
+				text += "  " + theme.fg("accent", `▸ ${current.activeForm}`);
 			}
-
-			const display = expanded ? items : items.slice(0, 8);
-			for (const todo of display) {
-				const icon = statusIcon(todo.status, theme);
-				const label = todoLabel(todo, theme);
-				text += `\n${icon} ${label}`;
-			}
-			if (!expanded && items.length > 8) {
-				text += `\n${theme.fg("dim", `... ${items.length - 8} more`)}`;
-			}
-
 			return new Text(text, 0, 0);
 		},
 	});
@@ -239,7 +296,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			await ctx.ui.custom<void>((_tui, theme, _kb, done) => {
-				return new TodoListComponent(todos, theme, () => done());
+				return new TodoListOverlay(todos, theme, () => done());
 			});
 		},
 	});
