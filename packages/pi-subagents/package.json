@@ -1,0 +1,33 @@
+{
+  "name": "pi-subagents",
+  "version": "0.5.2-patched.1",
+  "description": "Patched fork of @tintinweb/pi-subagents — Claude Code-style autonomous sub-agents for pi.",
+  "author": "tintinweb (patched by Milko Slavov)",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "subagent",
+    "agent",
+    "autonomous"
+  ],
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-tui": "*",
+    "@sinclair/typebox": "*"
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "build": "echo 'pi compiles TS directly'"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.2"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  }
+}

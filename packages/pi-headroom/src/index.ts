@@ -21,6 +21,7 @@ export default function headroomExtension(pi: ExtensionAPI) {
   let proxyAvailable: boolean | null = null;
   let proxyWarningShown = false;
   let restartAttempted = false;
+  let runtimeActive = true;
 
   let lastStats: {
     tokensBefore: number;
@@ -63,8 +64,11 @@ export default function headroomExtension(pi: ExtensionAPI) {
       ctx.ui.setStatus("headroom", ctx.ui.theme.fg("dim", "⏳ Headroom starting..."));
 
       const ok = await proxyManager.ensureRunning((msg) => {
+        if (!runtimeActive) return;
         ctx.ui.setStatus("headroom", ctx.ui.theme.fg("dim", `⏳ ${msg}`));
       });
+
+      if (!runtimeActive) return;
 
       if (ok) {
         proxyAvailable = true;
@@ -86,6 +90,8 @@ export default function headroomExtension(pi: ExtensionAPI) {
     } else {
       // User-managed mode: just health-check
       const healthy = await checkProxyHealth();
+      if (!runtimeActive) return;
+
       if (healthy) {
         proxyAvailable = true;
         ctx.ui.setStatus(
@@ -105,6 +111,7 @@ export default function headroomExtension(pi: ExtensionAPI) {
   // ─── Session shutdown: stop proxy if we started it ──────────────────
 
   pi.on("session_shutdown", async () => {
+    runtimeActive = false;
     if (proxyManager) {
       await proxyManager.stop();
     }
@@ -113,7 +120,7 @@ export default function headroomExtension(pi: ExtensionAPI) {
   // ─── Core: compress context before every LLM call ───────────────────
 
   pi.on("context", async (event, ctx) => {
-    if (!enabled || proxyAvailable === false) return;
+    if (!enabled || proxyAvailable === false || !runtimeActive) return;
 
     // Convert AgentMessage[] → Pi-AI Message[] → OpenAI format
     const piMessages = convertToLlm(event.messages);
@@ -122,12 +129,16 @@ export default function headroomExtension(pi: ExtensionAPI) {
     const openaiMessages = piToOpenAI(piMessages);
     if (openaiMessages.length === 0) return;
 
+    const model = ctx.model?.id ?? "gpt-4o";
+
     try {
       const result: CompressResult = await compress(openaiMessages, {
         client,
-        model: ctx.model?.id ?? "gpt-4o",
+        model,
         fallback: true,
       });
+
+      if (!runtimeActive) return;
 
       if (!result.compressed || result.tokensSaved <= 0) {
         ctx.ui.setStatus(
@@ -163,6 +174,8 @@ export default function headroomExtension(pi: ExtensionAPI) {
 
       return { messages: compressedPiMessages as any };
     } catch (error) {
+      if (!runtimeActive) return;
+
       if (!proxyWarningShown) {
         proxyWarningShown = true;
         proxyAvailable = false;
@@ -179,8 +192,11 @@ export default function headroomExtension(pi: ExtensionAPI) {
       if (proxyManager && !restartAttempted) {
         restartAttempted = true;
         const recovered = await proxyManager.tryRestart((msg) => {
+          if (!runtimeActive) return;
           ctx.ui.setStatus("headroom", ctx.ui.theme.fg("dim", `⏳ ${msg}`));
         });
+        if (!runtimeActive) return;
+
         if (recovered) {
           proxyAvailable = true;
           proxyWarningShown = false;
@@ -212,8 +228,11 @@ export default function headroomExtension(pi: ExtensionAPI) {
           // Try to start the proxy
           ctx.ui.setStatus("headroom", ctx.ui.theme.fg("dim", "⏳ Starting..."));
           const ok = await proxyManager.ensureRunning((msg) => {
+            if (!runtimeActive) return;
             ctx.ui.setStatus("headroom", ctx.ui.theme.fg("dim", `⏳ ${msg}`));
           });
+          if (!runtimeActive) return;
+
           if (ok) {
             proxyAvailable = true;
             ctx.ui.notify("Headroom compression enabled", "info");
@@ -232,6 +251,8 @@ export default function headroomExtension(pi: ExtensionAPI) {
         } else {
           // User-managed: just health-check
           const ok2 = await checkProxyHealth();
+          if (!runtimeActive) return;
+
           if (ok2) {
             proxyAvailable = true;
             ctx.ui.notify("Headroom compression enabled", "info");
@@ -298,6 +319,8 @@ export default function headroomExtension(pi: ExtensionAPI) {
       ctx.ui.notify(`Checking Headroom proxy at ${baseUrl}...`, "info");
 
       const isHealthy = await checkProxyHealth();
+      if (!runtimeActive) return;
+
       if (isHealthy) {
         proxyAvailable = true;
 

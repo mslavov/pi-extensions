@@ -1,65 +1,28 @@
 /**
- * Plan Mode Extension — Integrated with pi-subagents and pi-tasks
+ * Plan Mode Extension — Integrated with @tintinweb/pi-subagents
  *
- * Flow:
- *   /plan <task>
- *     → Scout subagent explores the codebase
- *     → Planner subagent creates an implementation plan
- *     → Plan saved to .pi/plans/<slug>.md, displayed with file path
- *     → User reviews/edits the plan file
- *     → Execute: main agent (fresh context + plan) or worker subagent
- *     → Both execution paths create pi-tasks for structured tracking
+ * Iterative planning workflow inspired by Claude Code's plan mode:
+ *   1. Explore codebase (directly + Explore agents for parallel search)
+ *   2. Update plan file incrementally as understanding grows
+ *   3. Ask user clarifying questions via ask_user/questionnaire
+ *   4. Repeat until plan is complete
+ *   5. Call exit_plan_mode for user approval
  *
  * Commands:
  *   /plan [description]  Toggle plan mode, or start planning with a task
  *   Ctrl+Alt+P           Toggle plan mode
+ *
+ * Tools (model-initiated):
+ *   enter_plan_mode      Model can enter plan mode for complex tasks
+ *   exit_plan_mode       Model exits plan mode, presents plan for approval
  */
 
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import type { Api, Model } from "@mariozechner/pi-ai";
-import { Key } from "@mariozechner/pi-tui";
-import { extractPlanSteps, isSafeCommand, type PlanStep } from "./utils.js";
-
-type ModelTier = "fast" | "medium" | "best";
-
-function selectModelByTier(models: Model<Api>[], tier: ModelTier): string {
-	if (models.length === 0) {
-		const defaults: Record<ModelTier, string> = {
-			fast: "anthropic/claude-haiku-4-5",
-			medium: "anthropic/claude-sonnet-4-6",
-			best: "anthropic/claude-opus-4-6",
-		};
-		return defaults[tier];
-	}
-
-	const sorted = [...models].sort(
-		(a, b) => (a.cost.input + a.cost.output) - (b.cost.input + b.cost.output),
-	);
-
-	let pick: Model<Api>;
-	if (tier === "fast") {
-		pick = sorted[0];
-	} else if (tier === "best") {
-		const reasoningModels = sorted.filter((m) => m.reasoning);
-		pick = reasoningModels.length > 0
-			? reasoningModels[reasoningModels.length - 1]
-			: sorted[sorted.length - 1];
-	} else {
-		pick = sorted[Math.floor(sorted.length / 2)];
-	}
-
-	return `${pick.provider}/${pick.id}`;
-}
-
-// Tools allowed during planning phase (read-only + subagent orchestration)
-const PLAN_MODE_TOOLS = [
-	"read", "bash", "grep", "find", "ls",           // read-only exploration
-	"subagent", "subagent_status",                   // subagent orchestration
-	"questionnaire",                                 // clarifying questions
-	"todo_write",                                    // task tracking
-];
+import { getMarkdownTheme, type ExtensionAPI, type ExtensionContext, type ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
+import { Type } from "@sinclair/typebox";
+import { Key, Markdown, Text } from "@mariozechner/pi-tui";
+import { extractPlanSteps, type PlanStep } from "./utils.js";
 
 const TODO_TOOL = "todo_write";
 
@@ -69,6 +32,10 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 	let planDescription = "";
 	let planSteps: PlanStep[] = [];
 	let hasTodoExtension = false;
+	let fullInstructionsSent = false;
+	let planPresentedThisAgent = false;
+	// Stash the command context (has newSession) for "execute with clean context"
+	let lastCommandCtx: ExtensionCommandContext | undefined;
 
 	// ---- Helpers ----
 
@@ -92,11 +59,38 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		}
 	}
 
+	function textContent(content: unknown): string {
+		if (typeof content === "string") return content;
+		if (!Array.isArray(content)) return "";
+		return content
+			.map((part) => {
+				if (!part || typeof part !== "object") return "";
+				const text = (part as { text?: unknown }).text;
+				return typeof text === "string" ? text : "";
+			})
+			.filter(Boolean)
+			.join("\n");
+	}
+
+	function renderMarkdown(content: string): Markdown | Text {
+		return content.trim()
+			? new Markdown(content, 0, 0, getMarkdownTheme())
+			: new Text("", 0, 0);
+	}
+
 	function detectTodoExtension(): void {
 		try {
 			hasTodoExtension = pi.getAllTools().some((t) => t.name === TODO_TOOL);
 		} catch {
 			hasTodoExtension = false;
+		}
+	}
+
+	function sendUserMessage(ctx: ExtensionContext, content: string): void {
+		if (ctx.isIdle()) {
+			pi.sendUserMessage(content);
+		} else {
+			pi.sendUserMessage(content, { deliverAs: "followUp" });
 		}
 	}
 
@@ -111,11 +105,12 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 	function enablePlanMode(ctx: ExtensionContext): void {
 		planModeEnabled = true;
 		planSteps = [];
+		fullInstructionsSent = false;
 		planFilePath = generatePlanPath();
 
-		const tools = [...PLAN_MODE_TOOLS];
+		const tools = pi.getAllTools().map((t) => t.name);
 		pi.setActiveTools(tools);
-		ctx.ui.notify("Plan mode enabled — read-only exploration via subagents.");
+		ctx.ui.notify("Plan mode enabled — iterative planning workflow.");
 		updateStatus(ctx);
 		persistState();
 	}
@@ -124,6 +119,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		planModeEnabled = false;
 		planSteps = [];
 		planDescription = "";
+		fullInstructionsSent = false;
 		const tools = pi.getAllTools().map((t) => t.name);
 		pi.setActiveTools(tools);
 		ctx.ui.notify("Plan mode disabled. Full access restored.");
@@ -139,10 +135,15 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		});
 	}
 
+	pi.registerMessageRenderer("plan-result", (message) => renderMarkdown(textContent(message.content)));
+
 	/**
 	 * After planning completes, read the plan file, extract steps, and show the menu.
 	 */
-	async function presentPlan(ctx: ExtensionContext): Promise<void> {
+	async function presentPlan(
+		ctx: ExtensionContext,
+		options: { sendPreviewMessage?: boolean; onPreview?: (preview: string) => void } = {},
+	): Promise<string | undefined> {
 		const content = readPlanFile(planFilePath);
 
 		if (!content) {
@@ -156,7 +157,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 			if (recovery === "Retry planning") {
 				planFilePath = generatePlanPath();
 				persistState();
-				pi.sendUserMessage(planDescription || "Create the implementation plan");
+				sendUserMessage(ctx, planDescription || "Create the implementation plan");
 			} else {
 				disablePlanMode(ctx);
 			}
@@ -165,29 +166,33 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 
 		planSteps = extractPlanSteps(content);
 
-		// Display plan with file path
-		pi.sendMessage(
-			{
-				customType: "plan-result",
-				content: `📄 **Plan saved to:** \`${planFilePath}\`\n\nYou can review and edit the plan file before executing.\n\n---\n\n${content}`,
-				display: true,
-			},
-			{ triggerTurn: false },
-		);
+		const preview = `📋 **Plan saved to:** \`${planFilePath}\`\n\nYou can review and edit the plan file before executing.\n\n---\n\n${content}`;
+		options.onPreview?.(preview);
+
+		if (options.sendPreviewMessage !== false) {
+			await pi.sendMessage(
+				{
+					customType: "plan-result",
+					content: preview,
+					display: true,
+				},
+				{ triggerTurn: false },
+			);
+		}
 
 		// Show execution menu
-		const options: string[] = [];
+		const menuOptions: string[] = [];
 		if (hasTodoExtension) {
-			options.push("Execute with main agent (fresh context + plan + todo tracking)");
-			options.push("Execute with subagent (worker + todo tracking)");
+			menuOptions.push("Execute with main agent (fresh context + plan + todo tracking)");
+			menuOptions.push("Execute with subagent (worker + todo tracking)");
 		} else {
-			options.push("Execute with main agent");
-			options.push("Execute with subagent (worker)");
+			menuOptions.push("Execute with main agent");
+			menuOptions.push("Execute with subagent (worker)");
 		}
-		options.push("Refine the plan");
-		options.push("Exit plan mode");
+		menuOptions.push("Refine the plan");
+		menuOptions.push("Exit plan mode");
 
-		const choice = await ctx.ui.select("Plan ready — what next?", options);
+		const choice = await ctx.ui.select("Plan ready — what next?", menuOptions);
 
 		if (choice?.startsWith("Execute with main agent")) {
 			await executeWithMainAgent(ctx);
@@ -196,22 +201,22 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		} else if (choice === "Refine the plan") {
 			const refinement = await ctx.ui.editor("Describe what to change:", "");
 			if (refinement?.trim()) {
-				pi.sendUserMessage(refinement.trim());
+				sendUserMessage(ctx, refinement.trim());
 			}
 		} else if (choice === "Exit plan mode") {
 			disablePlanMode(ctx);
 		}
+
+		return preview;
 	}
 
 	/**
-	 * Execute plan with the main agent. Creates tasks for tracking, sends the plan as fresh context.
+	 * Execute plan with the main agent.
 	 */
 	async function executeWithMainAgent(ctx: ExtensionContext): Promise<void> {
-		// Re-read plan (user may have edited the file)
 		const content = readPlanFile(planFilePath) ?? "";
 		planSteps = extractPlanSteps(content);
 
-		// Exit plan mode, restore all tools
 		planModeEnabled = false;
 		const tools = pi.getAllTools().map((t) => t.name);
 		pi.setActiveTools(tools);
@@ -219,17 +224,38 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		persistState();
 
 		const todoInstructions = buildTodoInstructions(content);
-
-		pi.sendMessage(
-			{
-				customType: "plan-execute",
-				content: `Execute the following implementation plan. The plan file is at \`${planFilePath}\`.
+		const executeContent = `Execute the following implementation plan. The plan file is at \`${planFilePath}\`.
 
 ${todoInstructions}
 
 Read the plan file, then execute each step in order. Use todo_write to update progress — mark each task as \`in_progress\` when starting and \`completed\` when done.
 
-Focus only on the plan — ignore previous exploration context.`,
+Focus only on the plan — ignore previous exploration context.`;
+
+		// Try to start a fresh session so exploration context is gone
+		const cmdCtx = lastCommandCtx ?? (ctx as any);
+		if (typeof cmdCtx.newSession === "function") {
+			const { cancelled } = await cmdCtx.newSession({
+				withSession: async (freshCtx: any) => {
+					await freshCtx.sendMessage(
+						{
+							customType: "plan-execute",
+							content: executeContent,
+							display: true,
+						},
+						{ triggerTurn: true },
+					);
+				},
+			});
+			if (!cancelled) return;
+			// User cancelled new session — fall through to same-context execution
+		}
+
+		// Fallback: execute in current context
+		pi.sendMessage(
+			{
+				customType: "plan-execute",
+				content: executeContent,
 				display: true,
 			},
 			{ triggerTurn: true },
@@ -237,14 +263,12 @@ Focus only on the plan — ignore previous exploration context.`,
 	}
 
 	/**
-	 * Execute plan with a worker subagent. Creates tasks for tracking, delegates to worker.
+	 * Execute plan with a general-purpose subagent.
 	 */
 	async function executeWithSubagent(ctx: ExtensionContext): Promise<void> {
-		// Re-read plan (user may have edited the file)
 		const content = readPlanFile(planFilePath) ?? "";
 		planSteps = extractPlanSteps(content);
 
-		// Exit plan mode, restore all tools
 		planModeEnabled = false;
 		const tools = pi.getAllTools().map((t) => t.name);
 		pi.setActiveTools(tools);
@@ -252,27 +276,23 @@ Focus only on the plan — ignore previous exploration context.`,
 		persistState();
 
 		const todoInstructions = buildTodoInstructions(content);
-		const implementModel = selectModelByTier(ctx.modelRegistry.getAvailable(), "medium");
 
 		pi.sendMessage(
 			{
 				customType: "plan-execute",
 				content: `${todoInstructions}
 
-After creating the todos, delegate execution to a worker subagent:
+After creating the todos, delegate execution to a subagent:
 
-subagent({ agent: "worker", task: "Execute the implementation plan at ${planFilePath}. Read the plan file and implement each step. Use todo_write to update the todo list — mark each task as in_progress when starting and completed when done.\\n\\nOriginal request: ${escapeForTemplate(planDescription)}", model: "${implementModel}" })
+Agent({ subagent_type: "general-purpose", prompt: "Execute the implementation plan at ${planFilePath}. Read the plan file and implement each step. Use todo_write to update the todo list — mark each task as in_progress when starting and completed when done.\\n\\nOriginal request: ${escapeForTemplate(planDescription)}", description: "Execute implementation plan" })
 
-Monitor the subagent progress.`,
+Monitor the subagent progress with get_subagent_result.`,
 				display: true,
 			},
 			{ triggerTurn: true },
 		);
 	}
 
-	/**
-	 * Build instructions for creating pi-tasks from plan steps.
-	 */
 	function buildTodoInstructions(planContent: string): string {
 		if (!hasTodoExtension || planSteps.length === 0) {
 			return `**Plan file:** \`${planFilePath}\``;
@@ -292,10 +312,74 @@ Monitor the subagent progress.`,
 		return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");
 	}
 
+	// ---- Tools (model-initiated plan mode control) ----
+
+	pi.registerTool({
+		name: "enter_plan_mode",
+		label: "Enter Plan Mode",
+		description: `Enter plan mode for structured planning before implementation. Use this proactively when about to start a non-trivial implementation task. Getting user sign-off on your approach before writing code prevents wasted effort.
+
+Use when ANY of these apply:
+- The task is complex and spans multiple files or components
+- Multiple valid approaches exist (e.g., Redis vs in-memory caching)
+- The task involves architectural decisions or new subsystems
+- Requirements are unclear and you need to explore before understanding scope
+- User preferences matter and the implementation could go multiple ways
+- You would use ask_user to clarify the approach — use enter_plan_mode instead
+
+Do NOT use for:
+- Single-line or few-line fixes (typos, obvious bugs)
+- Tasks where the user gave very specific, detailed instructions
+- Pure research/exploration tasks (use the Agent tool with Explore type instead)
+
+Plan mode keeps all registered tools available while restricting direct write/edit tool calls to the plan file. You'll iteratively explore code, ask the user questions, and build the plan incrementally.`,
+		parameters: Type.Object({}),
+		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+			if (planModeEnabled) {
+				return { content: [{ type: "text" as const, text: "Already in plan mode." }], details: undefined };
+			}
+			detectTodoExtension();
+			enablePlanMode(ctx);
+			return { content: [{ type: "text" as const, text: `Plan mode enabled. Plan file: ${planFilePath}\n\nYou are now in planning mode. Direct write/edit tool calls are limited to the plan file. Explore the codebase, ask the user questions, and build the plan incrementally. Call the exit_plan_mode tool when the plan is ready for approval.` }], details: undefined };
+		},
+	});
+
+	pi.registerTool({
+		name: "exit_plan_mode",
+		label: "Exit Plan Mode",
+		description: `Exit plan mode and present the plan for user approval. Call this when:
+- Your plan is complete and written to the plan file
+- All ambiguities have been resolved (via ask_user or code exploration)
+- The plan covers: what to change, which files to modify, what to reuse, and how to verify
+
+Do NOT use ask_user to ask "Is this plan okay?" or "Should I proceed?" — that's what exit_plan_mode does.
+Use ask_user ONLY to clarify requirements or choose between approaches BEFORE finalizing the plan.`,
+		parameters: Type.Object({}),
+		renderCall(_args, theme) {
+			return new Text(theme.fg("accent", "📋 Plan preview"), 0, 0);
+		},
+		renderResult(result) {
+			return renderMarkdown(textContent(result.content));
+		},
+		async execute(_toolCallId, _params, _signal, onUpdate, ctx) {
+			if (!planModeEnabled) {
+				return { content: [{ type: "text" as const, text: "Not in plan mode." }], details: undefined };
+			}
+			planPresentedThisAgent = true;
+			const preview = await presentPlan(ctx, {
+				sendPreviewMessage: false,
+				onPreview: (text) => {
+					onUpdate?.({ content: [{ type: "text" as const, text }], details: undefined });
+				},
+			});
+			return { content: [{ type: "text" as const, text: preview ?? "Plan mode exited." }], details: undefined };
+		},
+	});
+
 	// ---- Commands ----
 
 	pi.registerFlag("plan", {
-		description: "Start in plan mode (read-only exploration via subagents)",
+		description: "Start in plan mode (iterative planning via agents)",
 		type: "boolean",
 		default: false,
 	});
@@ -304,12 +388,12 @@ Monitor the subagent progress.`,
 		description: "Toggle plan mode, or start planning: /plan <task description>",
 		handler: async (args, ctx) => {
 			detectTodoExtension();
+			lastCommandCtx = ctx as ExtensionCommandContext;
 
 			if (args?.trim()) {
 				planDescription = args.trim();
 				enablePlanMode(ctx);
-				// Trigger planning with subagents
-				pi.sendUserMessage(planDescription);
+				sendUserMessage(ctx, planDescription);
 			} else {
 				if (planModeEnabled) {
 					disablePlanMode(ctx);
@@ -324,6 +408,7 @@ Monitor the subagent progress.`,
 		description: "Toggle plan mode",
 		handler: async (ctx) => {
 			detectTodoExtension();
+			lastCommandCtx = ctx as ExtensionCommandContext;
 			if (planModeEnabled) {
 				disablePlanMode(ctx);
 			} else {
@@ -334,45 +419,104 @@ Monitor the subagent progress.`,
 
 	// ---- Event Handlers ----
 
-	// Block destructive bash in plan mode
+	// Restrict write/edit to the plan file only
 	pi.on("tool_call", async (event) => {
-		if (!planModeEnabled || event.toolName !== "bash") return;
-		const command = event.input.command as string;
-		if (!isSafeCommand(command)) {
-			return {
-				block: true,
-				reason: `Plan mode: command blocked. Only read-only commands allowed.\nCommand: ${command}`,
-			};
+		if (!planModeEnabled) return;
+
+		// Restrict write/edit to the plan file only
+		if (event.toolName === "write" || event.toolName === "edit") {
+			const targetPath = (event.input.path as string) ?? "";
+			if (!targetPath || !planFilePath || targetPath !== planFilePath) {
+				return {
+					block: true,
+					reason: `Plan mode: only the plan file can be edited.\nAllowed: ${planFilePath}\nAttempted: ${targetPath}`,
+				};
+			}
+			return; // allow write/edit to plan file
 		}
+
 	});
 
 	// Inject planning instructions
-	pi.on("before_agent_start", async (_event, ctx) => {
+	pi.on("before_agent_start", async (_event, _ctx) => {
 		if (!planModeEnabled) return;
 
-		const available = ctx.modelRegistry.getAvailable();
-		const scoutModel = selectModelByTier(available, "fast");
-		const plannerModel = selectModelByTier(available, "best");
+		// Sparse reminder on subsequent turns
+		if (fullInstructionsSent) {
+			return {
+				message: {
+					customType: "plan-mode-context",
+					content: `[PLAN MODE ACTIVE]
+Plan mode still active (see full instructions earlier in conversation). Direct write/edit tool calls are limited to the plan file (\`${planFilePath}\`).
+Follow iterative workflow: explore codebase, interview user, write to plan incrementally.
+End turns with ask_user (for clarifications) or by calling the exit_plan_mode tool (for plan approval).
+Do not ask about plan approval via text or ask_user — call the exit_plan_mode tool instead.`,
+					display: false,
+				},
+			};
+		}
+
+		fullInstructionsSent = true;
+
+		const planExistsInfo = readPlanFile(planFilePath)
+			? `A plan file already exists at \`${planFilePath}\`. You can read it and make incremental edits.`
+			: `No plan file exists yet. Create your plan at \`${planFilePath}\` using the write tool.`;
 
 		return {
 			message: {
 				customType: "plan-mode-context",
 				content: `[PLAN MODE ACTIVE]
-You are in plan mode. Your job is to create an implementation plan using subagents.
+You are in plan mode. Keep implementation work out of plan mode; direct write/edit tool calls are only allowed for the plan file below. Other registered tools remain available.
 
-Steps:
-1. Run the **scout** subagent to explore the codebase and understand the architecture:
-   subagent({ agent: "scout", task: "Explore the codebase for: ${escapeForTemplate(planDescription || "the user's request")}. Be thorough — trace imports, read key files, check tests and types.", model: "${scoutModel}", output: false })
+## Plan File
+${planExistsInfo}
+Build your plan incrementally by writing to or editing this file. This is the ONLY file you may edit.
 
-2. Once scout completes, run the **planner** subagent to create a detailed plan. Pass the scout's findings and save the plan to the designated file:
-   subagent({ agent: "planner", task: "Create a detailed implementation plan for: ${escapeForTemplate(planDescription || "the user's request")}. Scout findings: {previous}", output: "${planFilePath}", model: "${plannerModel}" })
+## Iterative Planning Workflow
 
-3. After the planner finishes, confirm the plan has been written.
+You are pair-planning with the user. Explore the code to build context, ask the user questions when you hit decisions you can't make alone, and write your findings into the plan file as you go.
 
-Restrictions:
-- Do NOT modify any project files — only explore and plan
-- Bash is restricted to read-only commands
-- Use the subagent tool for exploration and planning`,
+### The Loop
+
+Repeat this cycle until the plan is complete:
+
+1. **Explore** — Use read, bash, grep, find, ls to read code. Look for existing functions, utilities, and patterns to reuse. You can use the Explore agent type (via the Agent tool with \`subagent_type: "Explore"\`) to parallelize complex searches without filling your context, though for straightforward queries direct tools are simpler.
+2. **Update the plan file** — After each discovery, immediately capture what you learned. Don't wait until the end.
+3. **Ask the user** — When you hit an ambiguity or decision you can't resolve from code alone, use ask_user. Then go back to step 1.
+
+### First Turn
+
+Start by quickly scanning a few key files to form an initial understanding of the task scope. Then write a skeleton plan (headers and rough notes) and ask the user your first round of questions. Don't explore exhaustively before engaging the user.
+
+### Asking Good Questions
+
+- Never ask what you could find out by reading the code
+- Batch related questions together
+- Focus on things only the user can answer: requirements, preferences, tradeoffs, edge case priorities
+- Scale depth to the task — a vague feature request needs many rounds; a focused bug fix may need one or none
+
+### Plan File Structure
+
+Divide the plan into clear sections using markdown headers. Fill them out as you go:
+- **Context** — why this change is needed, what prompted it, intended outcome
+- **Approach** — only the recommended approach, not all alternatives
+- **Files to modify** — paths of critical files
+- **Existing code to reuse** — functions/utilities with file paths
+- **Verification** — how to test the changes end-to-end
+
+Keep it concise enough to scan quickly, but detailed enough to execute effectively.
+
+### When to Converge
+
+Your plan is ready when you've addressed all ambiguities and it covers: what to change, which files to modify, what existing code to reuse (with file paths), and how to verify the changes.
+
+### Ending Your Turn
+
+Your turn should only end by either:
+- Using ask_user to gather more information from the user
+- Calling the exit_plan_mode tool when the plan is ready for approval
+
+**Important:** Call the exit_plan_mode tool to request plan approval. Do NOT print \`exit_plan_mode\` as text. Do NOT ask about plan approval via text or ask_user. Do NOT say "Is this plan okay?" or "Should I proceed?" — call the tool for that.${planDescription ? `\n\n## Task\n${planDescription}` : ""}`,
 				display: false,
 			},
 		};
@@ -396,9 +540,13 @@ Restrictions:
 		};
 	});
 
+	pi.on("agent_start", async () => {
+		planPresentedThisAgent = false;
+	});
+
 	// After agent finishes in plan mode, present the plan and show menu
 	pi.on("agent_end", async (_event, ctx) => {
-		if (!planModeEnabled || !ctx.hasUI) return;
+		if (!planModeEnabled || !ctx.hasUI || planPresentedThisAgent) return;
 		await presentPlan(ctx);
 	});
 
@@ -411,7 +559,6 @@ Restrictions:
 			planModeEnabled = true;
 		}
 
-		// Restore persisted state
 		const entries = ctx.sessionManager.getEntries();
 		const saved = entries
 			.filter((e: any) => e.type === "custom" && e.customType === "plan-mode")
@@ -425,7 +572,8 @@ Restrictions:
 
 		if (planModeEnabled) {
 			if (!planFilePath) planFilePath = generatePlanPath();
-			pi.setActiveTools(PLAN_MODE_TOOLS);
+			const tools = pi.getAllTools().map((t) => t.name);
+			pi.setActiveTools(tools);
 		}
 		updateStatus(ctx);
 	});

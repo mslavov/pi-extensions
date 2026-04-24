@@ -116,33 +116,3 @@ export function extractPlanSteps(content: string): PlanStep[] {
 	return items;
 }
 
-// Destructive commands blocked in plan mode
-const DESTRUCTIVE_PATTERNS = [
-	/\brm\b/i, /\brmdir\b/i, /\bmv\b/i, /\bcp\b/i, /\bmkdir\b/i, /\btouch\b/i,
-	/\bchmod\b/i, /\bchown\b/i, /\bln\b/i, /\btee\b/i, /\btruncate\b/i, /\bdd\b/i,
-	/(^|[^<])>(?!>)/, />>/,
-	/\bnpm\s+(install|uninstall|update|ci|link|publish)/i,
-	/\byarn\s+(add|remove|install|publish)/i,
-	/\bpnpm\s+(add|remove|install|publish)/i,
-	/\bgit\s+(add|commit|push|pull|merge|rebase|reset|checkout|branch\s+-[dD]|stash|cherry-pick|revert|tag|init|clone)/i,
-	/\bsudo\b/i, /\bkill\b/i, /\breboot\b/i, /\bshutdown\b/i,
-	/\b(vim?|nano|emacs|code|subl)\b/i,
-];
-
-const SAFE_PATTERNS = [
-	/^\s*cat\b/, /^\s*head\b/, /^\s*tail\b/, /^\s*less\b/, /^\s*more\b/,
-	/^\s*grep\b/, /^\s*find\b/, /^\s*ls\b/, /^\s*pwd\b/, /^\s*echo\b/,
-	/^\s*wc\b/, /^\s*sort\b/, /^\s*uniq\b/, /^\s*diff\b/, /^\s*file\b/,
-	/^\s*stat\b/, /^\s*du\b/, /^\s*df\b/, /^\s*tree\b/, /^\s*which\b/,
-	/^\s*env\b/, /^\s*uname\b/, /^\s*whoami\b/, /^\s*date\b/, /^\s*uptime\b/,
-	/^\s*git\s+(status|log|diff|show|branch|remote|config\s+--get)/i,
-	/^\s*git\s+ls-/i,
-	/^\s*npm\s+(list|ls|view|info|search|outdated|audit)/i,
-	/^\s*node\s+--version/i,
-	/^\s*curl\s/i, /^\s*jq\b/, /^\s*sed\s+-n/i, /^\s*awk\b/,
-	/^\s*rg\b/, /^\s*fd\b/, /^\s*bat\b/,
-];
-
-export function isSafeCommand(command: string): boolean {
-	return !DESTRUCTIVE_PATTERNS.some((p) => p.test(command)) && SAFE_PATTERNS.some((p) => p.test(command));
-}
