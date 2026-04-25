@@ -15,8 +15,7 @@
   },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "*",
-    "@mariozechner/pi-ai": "*",
-    "@sinclair/typebox": "*"
+    "@mariozechner/pi-ai": "*"
   },
   "devDependencies": {
     "typescript": "^6.0.2"

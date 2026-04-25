@@ -430,8 +430,6 @@ export default function (pi: ExtensionAPI) {
     manager.clearCompleted();           // preserve existing behavior
   });
 
-  pi.on("session_switch", () => { manager.clearCompleted(); });
-
   const { unsubPing: unsubPingRpc, unsubSpawn: unsubSpawnRpc, unsubStop: unsubStopRpc } = registerRpcHandlers({
     events: pi.events,
     pi,
@@ -550,7 +548,61 @@ export default function (pi: ExtensionAPI) {
 
   // ---- Agent tool ----
 
-  pi.registerTool<any, AgentDetails>({
+  const AgentParamsSchema = Type.Object({
+    prompt: Type.String({
+      description: "The task for the agent to perform.",
+    }),
+    description: Type.String({
+      description: "A short (3-5 word) description of the task (shown in UI).",
+    }),
+    subagent_type: Type.String({
+      description: `The type of specialized agent to use. Available types: ${getAvailableTypes().join(", ")}. Custom agents from .pi/agents/*.md (project) or ~/.pi/agent/agents/*.md (global) are also available.`,
+    }),
+    model: Type.Optional(
+      Type.String({
+        description:
+          'Optional model override. Accepts "provider/modelId" or fuzzy name (e.g. "haiku", "sonnet"). Omit to use the agent type\'s default.',
+      }),
+    ),
+    thinking: Type.Optional(
+      Type.String({
+        description: "Thinking level: off, minimal, low, medium, high, xhigh. Overrides agent default.",
+      }),
+    ),
+    max_turns: Type.Optional(
+      Type.Number({
+        description: "Maximum number of agentic turns before stopping. Omit for unlimited (default).",
+        minimum: 1,
+      }),
+    ),
+    run_in_background: Type.Optional(
+      Type.Boolean({
+        description: "Set to true to run in background. Returns agent ID immediately. You will be notified on completion.",
+      }),
+    ),
+    resume: Type.Optional(
+      Type.String({
+        description: "Optional agent ID to resume from. Continues from previous context.",
+      }),
+    ),
+    isolated: Type.Optional(
+      Type.Boolean({
+        description: "If true, agent gets no extension/MCP tools — only built-in tools.",
+      }),
+    ),
+    inherit_context: Type.Optional(
+      Type.Boolean({
+        description: "If true, fork parent conversation into the agent. Default: false (fresh context).",
+      }),
+    ),
+    isolation: Type.Optional(
+      Type.Literal("worktree", {
+        description: 'Set to "worktree" to run the agent in a temporary git worktree (isolated copy of the repo). Changes are saved to a branch on completion.',
+      }),
+    ),
+  });
+
+  pi.registerTool<typeof AgentParamsSchema, AgentDetails>({
     name: "Agent",
     label: "Agent",
     description: `Launch a new agent to handle complex, multi-step tasks autonomously.
@@ -574,59 +626,7 @@ Guidelines:
 - Use thinking to control extended thinking level.
 - Use inherit_context if the agent needs the parent conversation history.
 - Use isolation: "worktree" to run the agent in an isolated git worktree (safe parallel file modifications).`,
-    parameters: Type.Object({
-      prompt: Type.String({
-        description: "The task for the agent to perform.",
-      }),
-      description: Type.String({
-        description: "A short (3-5 word) description of the task (shown in UI).",
-      }),
-      subagent_type: Type.String({
-        description: `The type of specialized agent to use. Available types: ${getAvailableTypes().join(", ")}. Custom agents from .pi/agents/*.md (project) or ~/.pi/agent/agents/*.md (global) are also available.`,
-      }),
-      model: Type.Optional(
-        Type.String({
-          description:
-            'Optional model override. Accepts "provider/modelId" or fuzzy name (e.g. "haiku", "sonnet"). Omit to use the agent type\'s default.',
-        }),
-      ),
-      thinking: Type.Optional(
-        Type.String({
-          description: "Thinking level: off, minimal, low, medium, high, xhigh. Overrides agent default.",
-        }),
-      ),
-      max_turns: Type.Optional(
-        Type.Number({
-          description: "Maximum number of agentic turns before stopping. Omit for unlimited (default).",
-          minimum: 1,
-        }),
-      ),
-      run_in_background: Type.Optional(
-        Type.Boolean({
-          description: "Set to true to run in background. Returns agent ID immediately. You will be notified on completion.",
-        }),
-      ),
-      resume: Type.Optional(
-        Type.String({
-          description: "Optional agent ID to resume from. Continues from previous context.",
-        }),
-      ),
-      isolated: Type.Optional(
-        Type.Boolean({
-          description: "If true, agent gets no extension/MCP tools — only built-in tools.",
-        }),
-      ),
-      inherit_context: Type.Optional(
-        Type.Boolean({
-          description: "If true, fork parent conversation into the agent. Default: false (fresh context).",
-        }),
-      ),
-      isolation: Type.Optional(
-        Type.Literal("worktree", {
-          description: 'Set to "worktree" to run the agent in a temporary git worktree (isolated copy of the repo). Changes are saved to a branch on completion.',
-        }),
-      ),
-    }),
+    parameters: AgentParamsSchema,
 
     // ---- Custom rendering: Claude Code style ----
 

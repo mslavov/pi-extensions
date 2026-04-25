@@ -1,7 +1,7 @@
 import { StringEnum } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@mariozechner/pi-coding-agent";
 import { Key, matchesKey, Text, truncateToWidth } from "@mariozechner/pi-tui";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import { DESCRIPTION, PROMPT } from "./prompt.js";
 
 interface TodoItem {

@@ -51,7 +51,6 @@
       "peerDependencies": {
         "@mariozechner/pi-ai": "*",
         "@mariozechner/pi-coding-agent": "*",
-        "@sinclair/typebox": "*",
       },
     },
     "packages/pi-plan-mode": {
@@ -86,7 +85,7 @@
         "@mariozechner/pi-ai": "*",
         "@mariozechner/pi-coding-agent": "*",
         "@mariozechner/pi-tui": "*",
-        "@sinclair/typebox": "*",
+        "typebox": "*",
       },
     },
   },
