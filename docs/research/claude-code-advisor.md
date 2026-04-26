@@ -1,4 +1,4 @@
-# How `/advisor` Works in `../claude-code`
+# How `/advisor` Works in `claude-code`
 
 Exploration date: 2026-04-25
 
