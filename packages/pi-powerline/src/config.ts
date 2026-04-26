@@ -16,6 +16,7 @@ export type SegmentName =
 	| "git"
 	| "model"
 	| "session"
+	| "subscription"
 	| "context"
 	| "metrics"
 	| "sessionId"
@@ -41,6 +42,10 @@ export interface SegmentConfig {
 	displayStyle?: ContextDisplayStyle;
 	showPercentageOnly?: boolean;
 	showTokensOnly?: boolean;
+	showProviderName?: boolean;
+	showReset?: boolean;
+	showPercentage?: boolean;
+	maxWindows?: number;
 	width?: number;
 	warningThreshold?: number;
 	criticalThreshold?: number;
@@ -101,6 +106,7 @@ const SEGMENT_NAMES = new Set<SegmentName>([
 	"git",
 	"model",
 	"session",
+	"subscription",
 	"context",
 	"metrics",
 	"sessionId",
@@ -114,6 +120,7 @@ const THEME_COLOR_KEYS = new Set<ThemeColorKey>([
 	"git",
 	"model",
 	"session",
+	"subscription",
 	"context",
 	"metrics",
 	"sessionId",
@@ -144,6 +151,7 @@ export const DEFAULT_CONFIG: PowerlineConfig = {
 			},
 			{
 				segments: {
+					subscription: { enabled: true, showProviderName: true, showReset: true, maxWindows: 3 },
 					context: { enabled: true, displayStyle: "bar" },
 					metrics: { enabled: true },
 					status: { enabled: true },
@@ -371,6 +379,11 @@ function normalizeSegment(name: SegmentName, input: unknown, warnings: string[])
 		copyNumber(input, segment, "criticalThreshold", 1, 100);
 	}
 
+	if (name === "subscription") {
+		copyBooleans(input, segment, ["showProviderName", "showReset", "showPercentage"]);
+		copyNumber(input, segment, "maxWindows", 1, 8);
+	}
+
 	if (name === "metrics") {
 		copyBooleans(input, segment, ["showDuration", "showMessages", "showLastResponse"]);
 	}
@@ -425,6 +438,8 @@ function getSegmentDefaults(name: SegmentName): SegmentConfig {
 			return { enabled: true, type: "tokens" };
 		case "context":
 			return { enabled: true, displayStyle: "bar" };
+		case "subscription":
+			return { enabled: true, showProviderName: true, showReset: true, showPercentage: true, maxWindows: 3 };
 		case "metrics":
 			return { enabled: true, showDuration: true, showMessages: true, showLastResponse: true };
 		case "sessionId":

@@ -22,6 +22,7 @@ import {
 } from "./config.js";
 import { GitCache } from "./git.js";
 import { renderSegments, type RenderedSegment, type RuntimeMetrics } from "./segments.js";
+import type { SubscriptionState } from "./subscription.js";
 import { getSymbols, type PowerlineSymbols } from "./symbols.js";
 
 export interface FooterDataLike {
@@ -37,6 +38,7 @@ interface PowerlineFooterOptions {
 	tui: TUI;
 	footerData: FooterDataLike;
 	metrics: RuntimeMetrics;
+	subscription: SubscriptionState;
 }
 
 const CONFIG_WATCH_DEBOUNCE_MS = 120;
@@ -113,6 +115,7 @@ export class PowerlineFooter implements Component {
 				footerData: this.options.footerData,
 				gitDetails: this.gitCache.get(),
 				metrics: this.options.metrics,
+				subscription: this.options.subscription,
 				symbols,
 			});
 			if (segments.length === 0) continue;

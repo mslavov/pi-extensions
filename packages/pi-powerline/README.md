@@ -2,7 +2,7 @@
 
 Configurable Powerline-style footer for [pi](https://github.com/mariozechner/pi-coding-agent).
 
-`pi-powerline` replaces pi's built-in footer with a multi-segment footer showing cwd, git state, model, session usage, context usage, lightweight metrics, and extension statuses.
+`pi-powerline` replaces pi's built-in footer with a multi-segment footer showing cwd, git state, model, session usage, subscription limits, context usage, lightweight metrics, and extension statuses.
 
 ## Install / local test
 
@@ -64,6 +64,7 @@ The directory is watched while pi is running, so edits to `config.json` update t
       },
       {
         "segments": {
+          "subscription": { "enabled": true, "showProviderName": true, "showReset": true, "maxWindows": 3 },
           "context": { "enabled": true, "displayStyle": "bar" },
           "metrics": { "enabled": true },
           "status": { "enabled": true }
@@ -114,6 +115,7 @@ Use `theme: "custom"` and override any segment color:
     "custom": {
       "directory": { "fg": "#ffffff", "bg": "#005f87" },
       "git": { "fg": "#111111", "bg": "#a6e3a1" },
+      "subscription": { "fg": "#111111", "bg": "#a6e3a1" },
       "warning": { "fg": "#111111", "bg": "#f9e2af" },
       "critical": { "fg": "#ffffff", "bg": "#f38ba8" }
     }
@@ -129,6 +131,7 @@ Use `theme: "custom"` and override any segment color:
 | `git` | pi footer branch + async cached git commands | `showSha`, `showWorkingTree`, `showOperation`, `showTag`, `showTimeSinceCommit`, `showStashCount`, `showUpstream`, `showRepoName` |
 | `model` | `ctx.model`, provider count, thinking level | shown provider is automatic when multiple providers are available |
 | `session` | assistant usage in pi session entries | `type`: `cost`, `tokens`, `both`, `breakdown` |
+| `subscription` | active model subscription usage | `showProviderName`, `showReset`, `showPercentage`, `maxWindows` |
 | `context` | `ctx.getContextUsage()` | `displayStyle`: `text`, `bar`, `blocks`, `blocks-line`, `dots`; `showPercentageOnly`; `showTokensOnly`; `width`; `warningThreshold`; `criticalThreshold` |
 | `metrics` | pi runtime/session data | `showDuration`, `showMessages`, `showLastResponse` |
 | `sessionId` | `ctx.sessionManager.getSessionId()` | `length`, `full` |
@@ -136,7 +139,36 @@ Use `theme: "custom"` and override any segment color:
 | `tmux` | `TMUX` environment variable | `label` |
 | `status` | `ctx.ui.setStatus()` values from other extensions | none |
 
-Git details refresh asynchronously and never run from `render(width)`, so the footer stays responsive. Branch changes trigger a redraw through pi's footer data provider.
+Git details and subscription usage refresh asynchronously and never run from `render(width)`, so the footer stays responsive. Branch changes trigger a redraw through pi's footer data provider.
+
+### Subscription limits
+
+The `subscription` segment auto-detects the active model provider and hides itself for unsupported providers. This first pass supports:
+
+- OpenAI Codex subscription models using the `openai-codex` OAuth provider.
+- Anthropic Claude subscription models using the `anthropic` OAuth provider.
+
+The segment uses pi's OAuth token refresh path for the active model when available. For local development or non-pi smoke checks, these environment overrides are supported: `OPENAI_CODEX_OAUTH_TOKEN`, `OPENAI_CODEX_ACCESS_TOKEN`, `CODEX_OAUTH_TOKEN`, `CODEX_ACCESS_TOKEN`, `OPENAI_CODEX_ACCOUNT_ID`, `CHATGPT_ACCOUNT_ID`, and `ANTHROPIC_OAUTH_TOKEN`.
+
+Example:
+
+```json
+{
+  "segments": {
+    "subscription": {
+      "enabled": true,
+      "showProviderName": true,
+      "showReset": true,
+      "showPercentage": true,
+      "maxWindows": 3
+    }
+  }
+}
+```
+
+Codex windows show remaining percentage and reset time. Claude windows show used percentage and reset time; Anthropic extra usage is shown as `Extra [on]` or `Extra [active]` when enabled.
+
+Provider detection, usage parsing, reset formatting, and model-window prioritization are adapted from `marckrenn/pi-sub`'s `packages/sub-core` (MIT license).
 
 ## Unsupported Claude-only features
 

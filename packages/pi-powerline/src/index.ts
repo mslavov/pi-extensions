@@ -2,15 +2,20 @@ import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-age
 import { loadConfig, summarizeConfig } from "./config.js";
 import { PowerlineFooter } from "./footer.js";
 import type { RuntimeMetrics } from "./segments.js";
+import { createSubscriptionController, type SubscriptionRefreshOptions } from "./subscription.js";
+
+const SUBSCRIPTION_REFRESH_TIMER_MS = 60_000;
 
 export default function powerlineExtension(pi: ExtensionAPI): void {
 	let footer: PowerlineFooter | undefined;
 	let metrics: RuntimeMetrics = { sessionStartedAt: Date.now() };
+	let subscriptionTimer: ReturnType<typeof setInterval> | undefined;
+	const subscription = createSubscriptionController(refreshFooter);
 
 	function installFooter(ctx: ExtensionContext): void {
 		if (!ctx.hasUI) return;
 		ctx.ui.setFooter((tui, _theme, footerData) => {
-			footer = new PowerlineFooter({ pi, ctx, tui, footerData, metrics });
+			footer = new PowerlineFooter({ pi, ctx, tui, footerData, metrics, subscription: subscription.state });
 			return footer;
 		});
 	}
@@ -19,12 +24,36 @@ export default function powerlineExtension(pi: ExtensionAPI): void {
 		footer?.invalidate();
 	}
 
+	function refreshSubscription(ctx: ExtensionContext, options?: SubscriptionRefreshOptions): void {
+		if (!ctx.hasUI) return;
+		void subscription.refresh(ctx, options).catch(() => refreshFooter());
+	}
+
+	function startSubscriptionTimer(ctx: ExtensionContext): void {
+		clearSubscriptionTimer();
+		if (!ctx.hasUI) return;
+		subscriptionTimer = setInterval(() => {
+			refreshSubscription(ctx);
+			refreshFooter();
+		}, SUBSCRIPTION_REFRESH_TIMER_MS);
+	}
+
+	function clearSubscriptionTimer(): void {
+		if (!subscriptionTimer) return;
+		clearInterval(subscriptionTimer);
+		subscriptionTimer = undefined;
+	}
+
 	pi.on("session_start", async (_event, ctx) => {
 		metrics = { sessionStartedAt: Date.now() };
 		installFooter(ctx);
+		startSubscriptionTimer(ctx);
+		refreshSubscription(ctx, { allowStaleCache: true });
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
+		clearSubscriptionTimer();
+		subscription.clear();
 		if (ctx.hasUI) ctx.ui.setFooter(undefined);
 		footer = undefined;
 	});
@@ -42,11 +71,17 @@ export default function powerlineExtension(pi: ExtensionAPI): void {
 		refreshFooter();
 	});
 
-	pi.on("turn_end", async () => refreshFooter());
+	pi.on("turn_end", async (_event, ctx) => {
+		refreshSubscription(ctx);
+		refreshFooter();
+	});
 	pi.on("tool_execution_end", async () => refreshFooter());
 	pi.on("session_compact", async () => refreshFooter());
 	pi.on("session_tree", async () => refreshFooter());
-	pi.on("model_select", async () => refreshFooter());
+	pi.on("model_select", async (_event, ctx) => {
+		refreshSubscription(ctx, { force: true, resetProvider: true });
+		refreshFooter();
+	});
 
 	pi.registerCommand("powerline", {
 		description: "Show, reload, or reset the pi-powerline footer config",

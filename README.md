@@ -9,6 +9,7 @@ Remote: `git@github.com:mslavov/pi-extensions.git`
 | Package | Description |
 |---------|-------------|
 | [pi-autocomplete](packages/pi-autocomplete/) | Includes gitignored files in pi's `@` file autocomplete |
+| [pi-context](packages/pi-context/) | Displays current pi context window usage with `/context` |
 | [pi-headroom](packages/pi-headroom/) | Transparent LLM context compression using Headroom |
 | [pi-markitdown](packages/pi-markitdown/) | Reads PDFs, Office files, images, and other non-text files as Markdown via MarkItDown |
 | [pi-plan-mode](packages/pi-plan-mode/) | Structured planning via scout/planner subagents with task tracking |
@@ -46,6 +47,7 @@ Or add local packages to `~/.pi/agent/settings.json`:
 {
   "packages": [
     "../../workspace/pi-extensions/packages/pi-subagents",
+    "../../workspace/pi-extensions/packages/pi-context",
     "../../workspace/pi-extensions/packages/pi-headroom",
     "../../workspace/pi-extensions/packages/pi-todo-write",
     "../../workspace/pi-extensions/packages/pi-plan-mode",
