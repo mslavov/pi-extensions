@@ -511,31 +511,6 @@ export default function (pi: ExtensionAPI) {
     widget.onTurnStart();
   });
 
-  /** Build the full type list text dynamically from the unified registry. */
-  const buildTypeListText = () => {
-    const defaultNames = getDefaultAgentNames();
-    const userNames = getUserAgentNames();
-
-    const defaultDescs = defaultNames.map((name) => {
-      const cfg = getAgentConfig(name);
-      const modelSuffix = cfg?.model ? ` (${getModelLabelFromConfig(cfg.model)})` : "";
-      return `- ${name}: ${cfg?.description ?? name}${modelSuffix}`;
-    });
-
-    const customDescs = userNames.map((name) => {
-      const cfg = getAgentConfig(name);
-      return `- ${name}: ${cfg?.description ?? name}`;
-    });
-
-    return [
-      "Default agents:",
-      ...defaultDescs,
-      ...(customDescs.length > 0 ? ["", "Custom agents:", ...customDescs] : []),
-      "",
-      "Custom agents can be defined in .pi/agents/<name>.md (project) or ~/.pi/agent/agents/<name>.md (global) — they are picked up automatically. Project-level agents override global ones. Creating a .md file with the same name as a default agent overrides it.",
-    ].join("\n");
-  };
-
   /** Derive a short model label from a model string. */
   function getModelLabelFromConfig(model: string): string {
     // Strip provider prefix (e.g. "anthropic/claude-sonnet-4-6" → "claude-sonnet-4-6")
@@ -544,7 +519,116 @@ export default function (pi: ExtensionAPI) {
     return name.replace(/-\d{8}$/, "");
   }
 
-  const typeListText = buildTypeListText();
+  function uniqueNames(names: string[]): string[] {
+    return [...new Set(names)];
+  }
+
+  function isFullBuiltinToolSet(names: string[] | undefined): boolean {
+    if (!names) return true;
+    const unique = uniqueNames(names);
+    return unique.length === BUILTIN_TOOL_NAMES.length && BUILTIN_TOOL_NAMES.every((name) => unique.includes(name));
+  }
+
+  function formatToolAccess(config: AgentConfig): string {
+    const builtinSet = new Set(BUILTIN_TOOL_NAMES);
+    const disallowed = uniqueNames(config.disallowedTools ?? []);
+    const deniedBuiltins = BUILTIN_TOOL_NAMES.filter((name) => disallowed.includes(name));
+    const deniedNonBuiltins = disallowed.filter((name) => !builtinSet.has(name));
+    const hasSpecificAllowlist = !isFullBuiltinToolSet(config.builtinToolNames);
+
+    let text: string;
+    if (hasSpecificAllowlist) {
+      const allowed = uniqueNames(config.builtinToolNames ?? [])
+        .filter((name) => builtinSet.has(name) && !disallowed.includes(name));
+      text = allowed.length > 0 ? allowed.join(", ") : "No built-in tools";
+    } else if (deniedBuiltins.length > 0) {
+      text = `All built-in tools except ${deniedBuiltins.join(", ")}`;
+    } else {
+      text = "All built-in tools";
+    }
+
+    return deniedNonBuiltins.length > 0
+      ? `${text} (also denies ${deniedNonBuiltins.join(", ")})`
+      : text;
+  }
+
+  function formatInheritance(value: true | string[] | false): string {
+    if (value === true) return "all";
+    if (value === false) return "none";
+    return value.length > 0 ? value.join(", ") : "none";
+  }
+
+  function isReadOnlyAgent(config: AgentConfig): boolean {
+    const disallowed = new Set(config.disallowedTools ?? []);
+    const toolNames = config.builtinToolNames ?? BUILTIN_TOOL_NAMES;
+    return !toolNames.some((name) => (name === "edit" || name === "write") && !disallowed.has(name));
+  }
+
+  function formatAgentDefaults(config: AgentConfig): string[] {
+    const defaults: string[] = [];
+    if (config.model) defaults.push(`model: ${getModelLabelFromConfig(config.model)}`);
+    if (config.runInBackground === true) defaults.push("background");
+    if (config.inheritContext === true) defaults.push("inherit_context");
+    if (config.isolated === true) defaults.push("isolated");
+    if (config.isolation === "worktree") defaults.push("worktree");
+    if (config.memory) defaults.push(`memory: ${config.memory}`);
+    if (config.maxTurns != null) defaults.push(`max_turns: ${config.maxTurns === 0 ? "unlimited" : config.maxTurns}`);
+    if (isReadOnlyAgent(config)) defaults.push("read-only");
+    return defaults;
+  }
+
+  function formatAgentLine(name: string): string | undefined {
+    const config = getAgentConfig(name);
+    if (!config || config.enabled === false) return undefined;
+
+    const extensions = config.isolated === true ? false : config.extensions;
+    const skills = config.isolated === true ? false : config.skills;
+    const details = [
+      `Tools: ${formatToolAccess(config)}`,
+      `Extensions: ${formatInheritance(extensions)}`,
+      `Skills: ${formatInheritance(skills)}`,
+    ];
+    const defaults = formatAgentDefaults(config);
+    if (defaults.length > 0) details.push(`Defaults: ${defaults.join(", ")}`);
+
+    const description = config.description.replace(/\s+/g, " ").trim() || name;
+    return `- ${name}: ${description} (${details.join("; ")})`;
+  }
+
+  function buildAgentListText(): string {
+    const available = new Set(getAvailableTypes());
+    const formatLines = (names: string[]) => names
+      .filter((name) => available.has(name))
+      .map((name) => formatAgentLine(name))
+      .filter((line): line is string => line != null);
+
+    const defaultLines = formatLines(getDefaultAgentNames());
+    const customLines = formatLines(getUserAgentNames());
+    const sections: string[] = [];
+    if (defaultLines.length > 0) sections.push(["Default agents:", ...defaultLines].join("\n"));
+    if (customLines.length > 0) sections.push(["Custom agents:", ...customLines].join("\n"));
+    return sections.join("\n\n") || "No enabled agents.";
+  }
+
+  function buildMainAgentGuidance(): string {
+    return `## Subagents (pi-subagents extension)
+
+Subagents are available through the Agent tool for clearly beneficial delegation: tasks that match an agent description, independent parallel work, or broad exploration that would bloat the main context. Keep routine work in the main agent.
+
+Current available agents:
+${buildAgentListText()}
+
+Reminder: prefer direct read/grep/find/bash for simple directed file or code lookups, and do not duplicate work already delegated to a subagent.`;
+  }
+
+  pi.on("before_agent_start", async (event) => {
+    if (!pi.getActiveTools().includes("Agent")) return;
+
+    reloadCustomAgents();
+    return {
+      systemPrompt: event.systemPrompt + "\n\n" + buildMainAgentGuidance(),
+    };
+  });
 
   // ---- Agent tool ----
 
@@ -607,25 +691,42 @@ export default function (pi: ExtensionAPI) {
     label: "Agent",
     description: `Launch a new agent to handle complex, multi-step tasks autonomously.
 
-The Agent tool launches specialized agents that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.
+The Agent tool launches specialized pi subagents for delegated work. Use it conservatively: choose a subagent when its description clearly matches the task, when independent parallel work is useful, or when broad exploration would bloat the main context.
 
-Available agent types:
-${typeListText}
+## Available agent types and effective capabilities
+${buildAgentListText()}
 
-Guidelines:
-- For parallel work, use run_in_background: true on each agent. Foreground calls run sequentially — only one executes at a time.
-- Use Explore for codebase searches and code understanding.
+Custom agents can be defined in .pi/agents/<name>.md (project) or ~/.pi/agent/agents/<name>.md (global). Project-level agents override global ones, and custom agents with default names override defaults.
+
+## When NOT to use the Agent tool
+- Do not use Agent for simple directed reads or searches; use read/grep/find/bash directly.
+- Do not use Agent for routine small edits or tasks you can finish in the main context with a few tool calls.
+- Do not duplicate work already delegated to a subagent; wait for its notification or call get_subagent_result.
+
+## Usage notes
+- For independent parallel work, call Agent once per subtask with run_in_background: true. Foreground calls run sequentially.
+- Use Explore for broad codebase searches and code understanding.
 - Use Plan for architecture and implementation planning.
-- Use general-purpose for complex tasks that need file editing.
-- Provide clear, detailed prompts so the agent can work autonomously.
-- Agent results are returned as text — summarize them for the user.
-- Use run_in_background for work you don't need immediately. You will be notified when it completes.
+- Use general-purpose for complex implementation work that may need editing tools.
+- Agent results are returned as text; summarize relevant findings for the user.
 - Use resume with an agent ID to continue a previous agent's work.
 - Use steer_subagent to send mid-run messages to a running background agent.
 - Use model to specify a different model (as "provider/modelId", or fuzzy e.g. "haiku", "sonnet").
 - Use thinking to control extended thinking level.
-- Use inherit_context if the agent needs the parent conversation history.
-- Use isolation: "worktree" to run the agent in an isolated git worktree (safe parallel file modifications).`,
+- Use inherit_context when the agent truly needs the parent conversation history; otherwise include the needed context in prompt.
+- Use isolation: "worktree" to run the agent in an isolated git worktree for safe parallel file modifications.
+
+## Writing the prompt
+- Provide the objective, relevant files/symbols, constraints, and desired output format.
+- Include enough context for the spawned agent to work independently; do not rely on unstated parent conversation details.
+- For background agents, ask for a concise final answer with file paths and line numbers when applicable.`,
+    promptSnippet: "Launch specialized subagents for complex delegated tasks",
+    promptGuidelines: [
+      "Use Agent when the task clearly matches a subagent description.",
+      "Use Agent for independent parallel work or broad exploration that would bloat the main context.",
+      "Prefer direct read/grep/find/bash over Agent for simple directed file or code lookups.",
+      "Do not duplicate work already delegated to Agent; wait for its notification or use get_subagent_result.",
+    ],
     parameters: AgentParamsSchema,
 
     // ---- Custom rendering: Claude Code style ----

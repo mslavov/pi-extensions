@@ -65,6 +65,18 @@
         "@sinclair/typebox": "*",
       },
     },
+    "packages/pi-powerline": {
+      "name": "pi-powerline",
+      "version": "0.1.0",
+      "devDependencies": {
+        "typescript": "^6.0.2",
+      },
+      "peerDependencies": {
+        "@mariozechner/pi-ai": "*",
+        "@mariozechner/pi-coding-agent": "*",
+        "@mariozechner/pi-tui": "*",
+      },
+    },
     "packages/pi-subagents": {
       "name": "pi-subagents",
       "version": "0.5.2-patched.1",
@@ -641,6 +653,8 @@
     "pi-markitdown": ["pi-markitdown@workspace:packages/pi-markitdown"],
 
     "pi-plan-mode": ["pi-plan-mode@workspace:packages/pi-plan-mode"],
+
+    "pi-powerline": ["pi-powerline@workspace:packages/pi-powerline"],
 
     "pi-subagents": ["pi-subagents@workspace:packages/pi-subagents"],
 

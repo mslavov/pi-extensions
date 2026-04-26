@@ -25,6 +25,9 @@ import { Key, Markdown, Text } from "@mariozechner/pi-tui";
 import { extractPlanSteps, type PlanStep } from "./utils.js";
 
 const TODO_TOOL = "todo_write";
+const AGENT_TOOL = "Agent";
+const EXPLORE_AGENT = "Explore";
+const PLAN_AGENT = "Plan";
 
 export default function planModeExtension(pi: ExtensionAPI): void {
 	let planModeEnabled = false;
@@ -32,6 +35,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 	let planDescription = "";
 	let planSteps: PlanStep[] = [];
 	let hasTodoExtension = false;
+	let hasAgentTool = false;
 	let fullInstructionsSent = false;
 	let planPresentedThisAgent = false;
 	// Stash the command context (has newSession) for "execute with clean context"
@@ -78,11 +82,14 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 			: new Text("", 0, 0);
 	}
 
-	function detectTodoExtension(): void {
+	function detectAvailableTools(): void {
 		try {
-			hasTodoExtension = pi.getAllTools().some((t) => t.name === TODO_TOOL);
+			const toolNames = new Set(pi.getAllTools().map((t) => t.name));
+			hasTodoExtension = toolNames.has(TODO_TOOL);
+			hasAgentTool = toolNames.has(AGENT_TOOL);
 		} catch {
 			hasTodoExtension = false;
+			hasAgentTool = false;
 		}
 	}
 
@@ -110,7 +117,11 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 
 		const tools = pi.getAllTools().map((t) => t.name);
 		pi.setActiveTools(tools);
-		ctx.ui.notify("Plan mode enabled — iterative planning workflow.");
+		ctx.ui.notify(
+			hasAgentTool
+				? "Plan mode enabled — agent-first planning workflow."
+				: "Plan mode enabled — iterative planning workflow.",
+		);
 		updateStatus(ctx);
 		persistState();
 	}
@@ -312,6 +323,123 @@ Monitor the subagent progress with get_subagent_result.`,
 		return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");
 	}
 
+	function planWorkflowReminder(): string {
+		return hasAgentTool
+			? "Follow the agent-first 5-phase workflow: Explore agents, Plan agents, review, write the final plan, then call exit_plan_mode."
+			: "Follow iterative workflow: explore codebase, interview user, write to plan incrementally.";
+	}
+
+	function buildPlanFileStructureInstructions(): string {
+		return `### Phase 4: Final Plan
+Goal: Write your final plan to the plan file (the only file you can edit).
+- Begin with a **Context** section: explain why this change is being made, what prompted it, and the intended outcome
+- Include only your recommended approach, not all alternatives
+- Keep the plan concise enough to scan quickly, but detailed enough to execute effectively
+- Include the paths of critical files to be modified
+- Reference existing functions and utilities you found that should be reused, with file paths
+- Include a verification section describing how to test the changes end-to-end`;
+	}
+
+	function buildAgentFirstWorkflowInstructions(): string {
+		return `## Plan Workflow
+
+### Phase 1: Initial Understanding
+Goal: Understand the user's request and the relevant code. Use direct read-only tools for quick targeted checks, but delegate broader exploration to ${EXPLORE_AGENT} agents.
+
+1. Focus on the user's request and the associated code paths. Search for existing functions, utilities, and patterns to reuse before proposing new code.
+2. Launch 1-3 ${EXPLORE_AGENT} agents to explore efficiently.
+   - Use 1 agent when the task is isolated to known files, specific paths, or a small targeted change.
+   - Use multiple agents when scope is uncertain, multiple areas are involved, or you need to understand existing patterns before planning.
+   - If using multiple agents, give each a specific search focus and set run_in_background: true. Collect results with get_subagent_result using wait: true.
+   - Quality over quantity: use the minimum number of agents necessary.
+   - Do not proceed to Phase 2 until the exploration results you need have completed.
+
+### Phase 2: Design
+Goal: Design an implementation approach.
+
+Launch ${PLAN_AGENT} agent(s) to design the implementation based on the user's intent and your Phase 1 exploration results.
+
+**Guidelines:**
+- Default: launch at least 1 ${PLAN_AGENT} agent for most non-trivial tasks. It helps validate your understanding and consider trade-offs.
+- Skip ${PLAN_AGENT} agents only for truly trivial tasks like typo fixes, single-line changes, or simple renames.
+- For complex work, launch up to 3 ${PLAN_AGENT} agents in parallel with different perspectives. If launching multiple agents, set run_in_background: true and collect results with get_subagent_result using wait: true.
+- Do not write the final plan until the design results you need have completed.
+
+In each ${PLAN_AGENT} prompt:
+- Provide the relevant Phase 1 findings, including filenames and code path traces
+- Describe requirements and constraints
+- Request a concrete implementation plan with critical files and verification steps
+
+### Phase 3: Review
+Goal: Review the ${PLAN_AGENT} output and ensure alignment with the user's intent.
+1. Read the critical files identified by agents to deepen your understanding.
+2. Synthesize a single recommended approach.
+3. Use ask_user to clarify any remaining requirements or decisions that cannot be resolved from code.
+
+${buildPlanFileStructureInstructions()}
+
+### Phase 5: Call exit_plan_mode
+At the very end of your turn, once you have asked necessary questions and are happy with the final plan file, call exit_plan_mode to request user approval.
+
+Your turn should only end by either:
+- Using ask_user to gather more information from the user
+- Calling the exit_plan_mode tool when the plan is ready for approval
+
+**Important:** Call the exit_plan_mode tool to request plan approval. Do NOT print exit_plan_mode as text. Do NOT ask about plan approval via text or ask_user. Do NOT say "Is this plan okay?" or "Should I proceed?" — call the tool for that.`;
+	}
+
+	function buildIterativeWorkflowInstructions(): string {
+		const exploreAgentHint = hasAgentTool
+			? ` You can use the ${EXPLORE_AGENT} agent type through the ${AGENT_TOOL} tool to parallelize complex searches without filling your context, though for straightforward queries direct tools are simpler.`
+			: "";
+
+		return `## Iterative Planning Workflow
+
+You are pair-planning with the user. Explore the code to build context, ask the user questions when you hit decisions you can't make alone, and write your findings into the plan file as you go.
+
+### The Loop
+
+Repeat this cycle until the plan is complete:
+
+1. **Explore** — Use read, bash, grep, find, ls to read code. Look for existing functions, utilities, and patterns to reuse.${exploreAgentHint}
+2. **Update the plan file** — After each discovery, immediately capture what you learned. Don't wait until the end.
+3. **Ask the user** — When you hit an ambiguity or decision you can't resolve from code alone, use ask_user. Then go back to step 1.
+
+### First Turn
+
+Start by quickly scanning a few key files to form an initial understanding of the task scope. Then write a skeleton plan (headers and rough notes) and ask the user your first round of questions. Don't explore exhaustively before engaging the user.
+
+### Asking Good Questions
+
+- Never ask what you could find out by reading the code
+- Batch related questions together
+- Focus on things only the user can answer: requirements, preferences, tradeoffs, edge case priorities
+- Scale depth to the task — a vague feature request needs many rounds; a focused bug fix may need one or none
+
+### Plan File Structure
+
+Divide the plan into clear sections using markdown headers. Fill them out as you go:
+- **Context** — why this change is needed, what prompted it, intended outcome
+- **Approach** — only the recommended approach, not all alternatives
+- **Files to modify** — paths of critical files
+- **Existing code to reuse** — functions/utilities with file paths
+- **Verification** — how to test the changes end-to-end
+
+Keep it concise enough to scan quickly, but detailed enough to execute effectively.
+
+### When to Converge
+
+Your plan is ready when you've addressed all ambiguities and it covers: what to change, which files to modify, what existing code to reuse (with file paths), and how to verify the changes.
+
+### Ending Your Turn
+
+Your turn should only end by either:
+- Using ask_user to gather more information from the user
+- Calling the exit_plan_mode tool when the plan is ready for approval
+
+**Important:** Call the exit_plan_mode tool to request plan approval. Do NOT print exit_plan_mode as text. Do NOT ask about plan approval via text or ask_user. Do NOT say "Is this plan okay?" or "Should I proceed?" — call the tool for that.`;
+	}
+
 	// ---- Tools (model-initiated plan mode control) ----
 
 	pi.registerTool({
@@ -332,15 +460,15 @@ Do NOT use for:
 - Tasks where the user gave very specific, detailed instructions
 - Pure research/exploration tasks (use the Agent tool with Explore type instead)
 
-Plan mode keeps all registered tools available while restricting direct write/edit tool calls to the plan file. You'll iteratively explore code, ask the user questions, and build the plan incrementally.`,
+Plan mode keeps all registered tools available while restricting direct write/edit tool calls to the plan file. When the Agent tool is available, use Explore and Plan subagents for agent-first planning; otherwise, explore directly and build the plan incrementally.`,
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
 			if (planModeEnabled) {
 				return { content: [{ type: "text" as const, text: "Already in plan mode." }], details: undefined };
 			}
-			detectTodoExtension();
+			detectAvailableTools();
 			enablePlanMode(ctx);
-			return { content: [{ type: "text" as const, text: `Plan mode enabled. Plan file: ${planFilePath}\n\nYou are now in planning mode. Direct write/edit tool calls are limited to the plan file. Explore the codebase, ask the user questions, and build the plan incrementally. Call the exit_plan_mode tool when the plan is ready for approval.` }], details: undefined };
+			return { content: [{ type: "text" as const, text: `Plan mode enabled. Plan file: ${planFilePath}\n\nYou are now in planning mode. Direct write/edit tool calls are limited to the plan file. ${planWorkflowReminder()} Call the exit_plan_mode tool when the plan is ready for approval.` }], details: undefined };
 		},
 	});
 
@@ -387,7 +515,7 @@ Use ask_user ONLY to clarify requirements or choose between approaches BEFORE fi
 	pi.registerCommand("plan", {
 		description: "Toggle plan mode, or start planning: /plan <task description>",
 		handler: async (args, ctx) => {
-			detectTodoExtension();
+			detectAvailableTools();
 			lastCommandCtx = ctx as ExtensionCommandContext;
 
 			if (args?.trim()) {
@@ -407,7 +535,7 @@ Use ask_user ONLY to clarify requirements or choose between approaches BEFORE fi
 	pi.registerShortcut(Key.ctrlAlt("p"), {
 		description: "Toggle plan mode",
 		handler: async (ctx) => {
-			detectTodoExtension();
+			detectAvailableTools();
 			lastCommandCtx = ctx as ExtensionCommandContext;
 			if (planModeEnabled) {
 				disablePlanMode(ctx);
@@ -440,6 +568,7 @@ Use ask_user ONLY to clarify requirements or choose between approaches BEFORE fi
 	// Inject planning instructions
 	pi.on("before_agent_start", async (_event, _ctx) => {
 		if (!planModeEnabled) return;
+		detectAvailableTools();
 
 		// Sparse reminder on subsequent turns
 		if (fullInstructionsSent) {
@@ -448,7 +577,7 @@ Use ask_user ONLY to clarify requirements or choose between approaches BEFORE fi
 					customType: "plan-mode-context",
 					content: `[PLAN MODE ACTIVE]
 Plan mode still active (see full instructions earlier in conversation). Direct write/edit tool calls are limited to the plan file (\`${planFilePath}\`).
-Follow iterative workflow: explore codebase, interview user, write to plan incrementally.
+${planWorkflowReminder()}
 End turns with ask_user (for clarifications) or by calling the exit_plan_mode tool (for plan approval).
 Do not ask about plan approval via text or ask_user — call the exit_plan_mode tool instead.`,
 					display: false,
@@ -472,51 +601,7 @@ You are in plan mode. Keep implementation work out of plan mode; direct write/ed
 ${planExistsInfo}
 Build your plan incrementally by writing to or editing this file. This is the ONLY file you may edit.
 
-## Iterative Planning Workflow
-
-You are pair-planning with the user. Explore the code to build context, ask the user questions when you hit decisions you can't make alone, and write your findings into the plan file as you go.
-
-### The Loop
-
-Repeat this cycle until the plan is complete:
-
-1. **Explore** — Use read, bash, grep, find, ls to read code. Look for existing functions, utilities, and patterns to reuse. You can use the Explore agent type (via the Agent tool with \`subagent_type: "Explore"\`) to parallelize complex searches without filling your context, though for straightforward queries direct tools are simpler.
-2. **Update the plan file** — After each discovery, immediately capture what you learned. Don't wait until the end.
-3. **Ask the user** — When you hit an ambiguity or decision you can't resolve from code alone, use ask_user. Then go back to step 1.
-
-### First Turn
-
-Start by quickly scanning a few key files to form an initial understanding of the task scope. Then write a skeleton plan (headers and rough notes) and ask the user your first round of questions. Don't explore exhaustively before engaging the user.
-
-### Asking Good Questions
-
-- Never ask what you could find out by reading the code
-- Batch related questions together
-- Focus on things only the user can answer: requirements, preferences, tradeoffs, edge case priorities
-- Scale depth to the task — a vague feature request needs many rounds; a focused bug fix may need one or none
-
-### Plan File Structure
-
-Divide the plan into clear sections using markdown headers. Fill them out as you go:
-- **Context** — why this change is needed, what prompted it, intended outcome
-- **Approach** — only the recommended approach, not all alternatives
-- **Files to modify** — paths of critical files
-- **Existing code to reuse** — functions/utilities with file paths
-- **Verification** — how to test the changes end-to-end
-
-Keep it concise enough to scan quickly, but detailed enough to execute effectively.
-
-### When to Converge
-
-Your plan is ready when you've addressed all ambiguities and it covers: what to change, which files to modify, what existing code to reuse (with file paths), and how to verify the changes.
-
-### Ending Your Turn
-
-Your turn should only end by either:
-- Using ask_user to gather more information from the user
-- Calling the exit_plan_mode tool when the plan is ready for approval
-
-**Important:** Call the exit_plan_mode tool to request plan approval. Do NOT print \`exit_plan_mode\` as text. Do NOT ask about plan approval via text or ask_user. Do NOT say "Is this plan okay?" or "Should I proceed?" — call the tool for that.${planDescription ? `\n\n## Task\n${planDescription}` : ""}`,
+${hasAgentTool ? buildAgentFirstWorkflowInstructions() : buildIterativeWorkflowInstructions()}${planDescription ? `\n\n## Task\n${planDescription}` : ""}`,
 				display: false,
 			},
 		};
@@ -553,7 +638,7 @@ Your turn should only end by either:
 	// ---- Session Restore ----
 
 	pi.on("session_start", async (_event, ctx) => {
-		detectTodoExtension();
+		detectAvailableTools();
 
 		if (pi.getFlag("plan") === true) {
 			planModeEnabled = true;
