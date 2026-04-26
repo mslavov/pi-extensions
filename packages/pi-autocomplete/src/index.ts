@@ -9,7 +9,32 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import type { AutocompleteProvider, AutocompleteSuggestions, AutocompleteItem } from "@mariozechner/pi-tui";
 import { spawn } from "node:child_process";
-import { basename } from "node:path";
+import { accessSync, constants } from "node:fs";
+import { homedir } from "node:os";
+import { basename, join } from "node:path";
+
+function isExecutable(path: string) {
+	try {
+		accessSync(path, constants.X_OK);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+async function resolveFdPath(pi: ExtensionAPI): Promise<string | null> {
+	try {
+		const result = await pi.exec("which", ["fd"], { timeout: 5_000 });
+		if (result.code === 0 && result.stdout.trim()) {
+			return result.stdout.trim();
+		}
+	} catch {
+		// Fall back to pi's bundled fd below.
+	}
+
+	const bundledPath = join(homedir(), ".pi", "agent", "bin", process.platform === "win32" ? "fd.exe" : "fd");
+	return isExecutable(bundledPath) ? bundledPath : null;
+}
 
 function walkWithNoIgnore(
 	baseDir: string,
@@ -83,7 +108,6 @@ function walkWithNoIgnore(
 			const results: { path: string; isDirectory: boolean }[] = [];
 			for (const line of stdout.trim().split("\n")) {
 				if (!line) continue;
-				// Normalize path separators
 				const normalized = line.replace(/\\/g, "/");
 				const hasTrailingSlash = normalized.endsWith("/");
 				const cleanPath = hasTrailingSlash ? normalized.slice(0, -1) : normalized;
@@ -106,21 +130,12 @@ export default function (pi: ExtensionAPI) {
 	let fdPath: string | null = null;
 
 	pi.on("session_start", async (_event, ctx) => {
-		// Find fd
-		try {
-			const result = await pi.exec("which", ["fd"], { timeout: 5_000 });
-			if (result.code === 0 && result.stdout.trim()) {
-				fdPath = result.stdout.trim();
-			}
-		} catch {
-			// fd not found — extension does nothing
-		}
+		fdPath = await resolveFdPath(pi);
 		if (!ctx.hasUI) return;
 
 		ctx.ui.addAutocompleteProvider((original: AutocompleteProvider): AutocompleteProvider => {
 			return {
 				async getSuggestions(lines, cursorLine, cursorCol, options): Promise<AutocompleteSuggestions | null> {
-					// Get the original suggestions first
 					const originalResult = await original.getSuggestions(lines, cursorLine, cursorCol, options);
 
 					// Only augment @ fuzzy search results — that's where fd filters by .gitignore
@@ -135,8 +150,8 @@ export default function (pi: ExtensionAPI) {
 
 					const rawQuery = atMatch[1] || "";
 
-					// Run fd --no-ignore to find gitignored files
-					const cwd = process.cwd();
+					// pi's process cwd can differ from the active session cwd.
+					const cwd = ctx.sessionManager.getCwd();
 					const noIgnoreEntries = await walkWithNoIgnore(cwd, fdPath, rawQuery, 100, options.signal);
 
 					if (options.signal.aborted || noIgnoreEntries.length === 0) {
