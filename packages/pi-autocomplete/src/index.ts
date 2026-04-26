@@ -9,9 +9,135 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import type { AutocompleteProvider, AutocompleteSuggestions, AutocompleteItem } from "@mariozechner/pi-tui";
 import { spawn } from "node:child_process";
-import { accessSync, constants } from "node:fs";
+import { accessSync, constants, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
+
+type AutocompleteConfig = {
+	exclude: string[];
+	maxResults: number;
+	maxSuggestions: number;
+};
+
+const DEFAULT_CONFIG: AutocompleteConfig = {
+	exclude: [
+		"node_modules",
+		"bower_components",
+		"jspm_packages",
+		".pnpm-store",
+		".yarn",
+		".venv",
+		"venv",
+		"env",
+		"__pycache__",
+		".pytest_cache",
+		".mypy_cache",
+		".ruff_cache",
+		".tox",
+		".nox",
+		".eggs",
+		".cache",
+		".turbo",
+		".next",
+		".nuxt",
+		".svelte-kit",
+		".parcel-cache",
+		"vendor",
+		".bundle",
+		"Pods",
+		"DerivedData",
+		".gradle",
+		"target",
+		".dart_tool",
+		".build",
+		"_build",
+		"deps",
+	],
+	maxResults: 100,
+	maxSuggestions: 20,
+};
+
+const ALWAYS_EXCLUDE = [".git"];
+const CONFIG_PATH = join(homedir(), ".pi", "agent", "extensions", "pi-autocomplete", "config.json");
+
+function defaultConfig(): AutocompleteConfig {
+	return {
+		...DEFAULT_CONFIG,
+		exclude: [...DEFAULT_CONFIG.exclude],
+	};
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readPositiveInteger(value: unknown, name: string): number {
+	if (!Number.isInteger(value) || (value as number) <= 0) {
+		throw new Error(`${name} must be a positive integer`);
+	}
+	return value as number;
+}
+
+function resolveConfig(value: unknown): AutocompleteConfig {
+	if (!isRecord(value)) {
+		throw new Error("expected a JSON object");
+	}
+
+	const config = defaultConfig();
+	if ("exclude" in value) {
+		if (
+			!Array.isArray(value.exclude) ||
+			value.exclude.some((item) => typeof item !== "string" || item.trim() === "")
+		) {
+			throw new Error("exclude must be an array of non-empty strings");
+		}
+		config.exclude = [...new Set(value.exclude.map((item) => item.trim()))];
+	}
+	if ("maxResults" in value) {
+		config.maxResults = readPositiveInteger(value.maxResults, "maxResults");
+	}
+	if ("maxSuggestions" in value) {
+		config.maxSuggestions = readPositiveInteger(value.maxSuggestions, "maxSuggestions");
+	}
+
+	return config;
+}
+
+function hasErrorCode(error: unknown, code: string) {
+	return isRecord(error) && error.code === code;
+}
+
+function formatError(error: unknown) {
+	return error instanceof Error ? error.message : String(error);
+}
+
+function loadConfig(): { config: AutocompleteConfig; error?: string } {
+	let raw: string;
+	try {
+		raw = readFileSync(CONFIG_PATH, "utf-8");
+	} catch (error) {
+		if (hasErrorCode(error, "ENOENT")) {
+			return { config: defaultConfig() };
+		}
+		return {
+			config: defaultConfig(),
+			error: `failed to read ${CONFIG_PATH}: ${formatError(error)}`,
+		};
+	}
+
+	try {
+		return { config: resolveConfig(JSON.parse(raw)) };
+	} catch (error) {
+		return {
+			config: defaultConfig(),
+			error: `failed to parse ${CONFIG_PATH}: ${formatError(error)}`,
+		};
+	}
+}
+
+function getExcludePatterns(config: AutocompleteConfig) {
+	return [...new Set([...ALWAYS_EXCLUDE, ...config.exclude])];
+}
 
 function isExecutable(path: string) {
 	try {
@@ -40,7 +166,7 @@ function walkWithNoIgnore(
 	baseDir: string,
 	fdPath: string,
 	query: string,
-	maxResults: number,
+	config: AutocompleteConfig,
 	signal: AbortSignal,
 ): Promise<{ path: string; isDirectory: boolean }[]> {
 	return new Promise((resolve) => {
@@ -53,7 +179,7 @@ function walkWithNoIgnore(
 			"--base-directory",
 			baseDir,
 			"--max-results",
-			String(maxResults),
+			String(config.maxResults),
 			"--type",
 			"f",
 			"--type",
@@ -61,9 +187,11 @@ function walkWithNoIgnore(
 			"--follow",
 			"--hidden",
 			"--no-ignore",
-			"--exclude",
-			".git",
 		];
+
+		for (const pattern of getExcludePatterns(config)) {
+			args.push("--exclude", pattern);
+		}
 
 		if (query.includes("/")) {
 			args.push("--full-path");
@@ -127,11 +255,15 @@ function walkWithNoIgnore(
 }
 
 export default function (pi: ExtensionAPI) {
-	let fdPath: string | null = null;
-
 	pi.on("session_start", async (_event, ctx) => {
-		fdPath = await resolveFdPath(pi);
 		if (!ctx.hasUI) return;
+
+		const { config, error } = loadConfig();
+		if (error) {
+			ctx.ui.notify(`pi-autocomplete: ${error}; using defaults`, "warning");
+		}
+
+		const fdPath = await resolveFdPath(pi);
 
 		ctx.ui.addAutocompleteProvider((original: AutocompleteProvider): AutocompleteProvider => {
 			return {
@@ -152,7 +284,7 @@ export default function (pi: ExtensionAPI) {
 
 					// pi's process cwd can differ from the active session cwd.
 					const cwd = ctx.sessionManager.getCwd();
-					const noIgnoreEntries = await walkWithNoIgnore(cwd, fdPath, rawQuery, 100, options.signal);
+					const noIgnoreEntries = await walkWithNoIgnore(cwd, fdPath, rawQuery, config, options.signal);
 
 					if (options.signal.aborted || noIgnoreEntries.length === 0) {
 						return originalResult;
@@ -196,7 +328,7 @@ export default function (pi: ExtensionAPI) {
 					}
 
 					newItems.sort((a, b) => b.score - a.score);
-					const topNew = newItems.slice(0, 20).map(({ score: _score, ...item }) => item);
+					const topNew = newItems.slice(0, config.maxSuggestions).map(({ score: _score, ...item }) => item);
 
 					if (!originalResult) {
 						return {
