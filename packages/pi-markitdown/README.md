@@ -14,7 +14,6 @@ Converted files are cached as `.md` files in `~/.pi/markitdown-cache/`, so offse
 | ------------ | --------------------------------------------- |
 | Documents    | `.pdf`, `.docx`, `.doc`, `.pptx`, `.ppt`      |
 | Spreadsheets | `.xlsx`, `.xls`                               |
-| Web          | `.html`, `.htm`                               |
 | Rich text    | `.rtf`                                        |
 | eBooks       | `.epub`                                       |
 | Archives     | `.zip`                                        |
@@ -22,7 +21,7 @@ Converted files are cached as `.md` files in `~/.pi/markitdown-cache/`, so offse
 | Images       | `.jpg`, `.jpeg`, `.png`, `.bmp`, `.tiff`, `.tif` |
 | Audio        | `.wav`, `.mp3`                                |
 
-> **Note:** Text-based formats like `.csv`, `.json`, and `.xml` are excluded — the standard `read` tool handles them natively with no benefit from conversion. Images are also excluded from conversion since the read tool handles them natively via vision.
+> **Note:** Text-based formats like `.html`, `.htm`, `.csv`, `.json`, and `.xml` are excluded — the standard `read` tool handles them natively with no benefit from conversion. Images are also excluded from conversion since the read tool handles them natively via vision.
 
 ## Installation
 

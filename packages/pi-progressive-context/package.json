@@ -1,0 +1,23 @@
+{
+  "name": "pi-progressive-context",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Lazy nested AGENTS.md / CLAUDE.md context loading for pi",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "author": "Milko Slavov <milko.slavov@gmail.com>",
+  "pi": {
+    "extensions": ["./src/index.ts"]
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "build": "echo 'pi compiles TS directly'",
+    "clean": "echo 'nothing to clean'"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.2"
+  }
+}

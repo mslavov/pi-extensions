@@ -14,6 +14,7 @@ Remote: `git@github.com:mslavov/pi-extensions.git`
 | [pi-markitdown](packages/pi-markitdown/) | Reads PDFs, Office files, images, and other non-text files as Markdown via MarkItDown |
 | [pi-plan-mode](packages/pi-plan-mode/) | Structured planning via scout/planner subagents with task tracking |
 | [pi-powerline](packages/pi-powerline/) | Configurable Powerline-style footer for pi |
+| [pi-progressive-context](packages/pi-progressive-context/) | Lazy nested AGENTS.md / CLAUDE.md context loading for pi |
 | [pi-subagents](packages/pi-subagents/) | Patched fork of `@tintinweb/pi-subagents` for autonomous sub-agents in pi |
 | [pi-todo-write](packages/pi-todo-write/) | TodoWrite tool for structured task list management in coding sessions |
 
@@ -53,7 +54,8 @@ Or add local packages to `~/.pi/agent/settings.json`:
     "../../workspace/pi-extensions/packages/pi-plan-mode",
     "../../workspace/pi-extensions/packages/pi-powerline",
     "../../workspace/pi-extensions/packages/pi-markitdown",
-    "../../workspace/pi-extensions/packages/pi-autocomplete"
+    "../../workspace/pi-extensions/packages/pi-autocomplete",
+    "../../workspace/pi-extensions/packages/pi-progressive-context"
   ]
 }
 ```

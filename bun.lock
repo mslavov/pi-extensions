@@ -88,6 +88,16 @@
         "@mariozechner/pi-tui": "*",
       },
     },
+    "packages/pi-progressive-context": {
+      "name": "pi-progressive-context",
+      "version": "0.1.0",
+      "devDependencies": {
+        "typescript": "^6.0.2",
+      },
+      "peerDependencies": {
+        "@mariozechner/pi-coding-agent": "*",
+      },
+    },
     "packages/pi-subagents": {
       "name": "pi-subagents",
       "version": "0.5.2-patched.1",
@@ -98,6 +108,16 @@
         "@mariozechner/pi-ai": "*",
         "@mariozechner/pi-coding-agent": "*",
         "@mariozechner/pi-tui": "*",
+        "@sinclair/typebox": "*",
+      },
+    },
+    "packages/pi-telegram": {
+      "name": "pi-telegram",
+      "version": "0.1.0",
+      "peerDependencies": {
+        "@mariozechner/pi-agent-core": "*",
+        "@mariozechner/pi-ai": "*",
+        "@mariozechner/pi-coding-agent": "*",
         "@sinclair/typebox": "*",
       },
     },
@@ -669,7 +689,11 @@
 
     "pi-powerline": ["pi-powerline@workspace:packages/pi-powerline"],
 
+    "pi-progressive-context": ["pi-progressive-context@workspace:packages/pi-progressive-context"],
+
     "pi-subagents": ["pi-subagents@workspace:packages/pi-subagents"],
+
+    "pi-telegram": ["pi-telegram@workspace:packages/pi-telegram"],
 
     "pi-todo-write": ["pi-todo-write@workspace:packages/pi-todo-write"],
 

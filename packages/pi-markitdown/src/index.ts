@@ -28,9 +28,6 @@ const MARKITDOWN_EXTENSIONS = new Set([
 	".xls",
 	// Archives
 	".zip",
-	// Web — markitdown strips HTML tags, ~60% token reduction
-	".html",
-	".htm",
 	// Rich text
 	".rtf",
 	// eBooks
@@ -74,9 +71,9 @@ function getCachePath(absolutePath: string, mtime: number): string {
 const SYSTEM_PROMPT_ADDITION = `
 
 ## MarkItDown (pi-markitdown extension)
-The \`read\` tool has been enhanced to support reading non-text files as Markdown. When you use \`read\` on a supported file type (PDF, DOCX, XLSX, PPTX, HTML, RTF, EPUB, ZIP, images, audio), the content is automatically converted to Markdown and cached. The read tool operates on the cached Markdown, so offset/limit work normally for navigating large converted documents.
+The \`read\` tool has been enhanced to support reading non-text files as Markdown. When you use \`read\` on a supported file type (PDF, DOCX, XLSX, PPTX, RTF, EPUB, ZIP, images, audio), the content is automatically converted to Markdown and cached. The read tool operates on the cached Markdown, so offset/limit work normally for navigating large converted documents.
 
-Supported formats: .pdf, .docx, .doc, .pptx, .ppt, .xlsx, .xls, .html, .htm, .rtf, .epub, .zip, .msg, .jpg, .jpeg, .png, .bmp, .tiff, .tif, .wav, .mp3
+Supported formats: .pdf, .docx, .doc, .pptx, .ppt, .xlsx, .xls, .rtf, .epub, .zip, .msg, .jpg, .jpeg, .png, .bmp, .tiff, .tif, .wav, .mp3
 `;
 
 // ─── Extension ────────────────────────────────────────────────────────
