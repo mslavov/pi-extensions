@@ -8,7 +8,7 @@
 import { truncateToWidth } from "@mariozechner/pi-tui";
 import type { AgentManager } from "../agent-manager.js";
 import { getConfig } from "../agent-types.js";
-import type { SubagentType } from "../types.js";
+import type { AgentModelInfo, SubagentType } from "../types.js";
 
 // ---- Constants ----
 
@@ -74,8 +74,7 @@ export interface AgentDetails {
   activity?: string;
   /** Current spinner frame index (for animated running indicator). */
   spinnerFrame?: number;
-  /** Short model name if different from parent (e.g. "haiku", "sonnet"). */
-  modelName?: string;
+  modelInfo?: AgentModelInfo;
   /** Notable config tags (e.g. ["thinking: high", "isolated"]). */
   tags?: string[];
   /** Current turn count. */
@@ -120,6 +119,16 @@ export function getDisplayName(type: SubagentType): string {
 export function getPromptModeLabel(type: SubagentType): string | undefined {
   const config = getConfig(type);
   return config.promptMode === "append" ? "twin" : undefined;
+}
+
+export function formatModelInfoParts(modelInfo?: AgentModelInfo): string[] {
+  if (!modelInfo) return [];
+
+  const parts: string[] = [];
+  if (modelInfo.agent) parts.push(`agent: ${modelInfo.agent}`);
+  if (modelInfo.override) parts.push(`override: ${modelInfo.override}`);
+  if (modelInfo.selected) parts.push(`selected: ${modelInfo.selected}`);
+  return parts;
 }
 
 /** Truncate text to a single line, max `len` chars. */
@@ -227,7 +236,7 @@ export class AgentWidget {
   }
 
   /** Render a finished agent line. */
-  private renderFinishedLine(a: { id: string; type: SubagentType; status: string; description: string; toolUses: number; startedAt: number; completedAt?: number; error?: string }, theme: Theme): string {
+  private renderFinishedLine(a: { id: string; type: SubagentType; status: string; description: string; toolUses: number; startedAt: number; completedAt?: number; error?: string; modelInfo?: AgentModelInfo }, theme: Theme): string {
     const name = getDisplayName(a.type);
     const modeLabel = getPromptModeLabel(a.type);
     const duration = formatMs((a.completedAt ?? Date.now()) - a.startedAt);
@@ -253,7 +262,7 @@ export class AgentWidget {
       statusText = theme.fg("warning", " aborted");
     }
 
-    const parts: string[] = [];
+    const parts: string[] = formatModelInfoParts(a.modelInfo);
     const activity = this.agentActivity.get(a.id);
     if (activity) parts.push(formatTurns(activity.turnCount, activity.maxTurns));
     if (a.toolUses > 0) parts.push(`${a.toolUses} tool use${a.toolUses === 1 ? "" : "s"}`);
@@ -310,7 +319,7 @@ export class AgentWidget {
         try { tokenText = formatTokens(bg.session.getSessionStats().tokens.total); } catch { /* */ }
       }
 
-      const parts: string[] = [];
+      const parts: string[] = formatModelInfoParts(a.modelInfo);
       if (bg) parts.push(formatTurns(bg.turnCount, bg.maxTurns));
       if (toolUses > 0) parts.push(`${toolUses} tool use${toolUses === 1 ? "" : "s"}`);
       if (tokenText) parts.push(tokenText);

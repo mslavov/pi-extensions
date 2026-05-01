@@ -93,7 +93,7 @@ vi.mock("@mariozechner/pi-coding-agent", () => {
 });
 
 // Mock pi-ai
-vi.mock("@mariozechner/pi-ai", () => ({}));
+vi.mock("@mariozechner/pi-ai", () => ({ complete: vi.fn() }));
 
 // Mock internal modules that do I/O
 vi.mock("../env.js", () => ({

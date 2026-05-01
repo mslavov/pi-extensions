@@ -20,6 +20,12 @@ export type MemoryScope = "user" | "project" | "local";
 export type IsolationMode = "worktree";
 
 /** Unified agent configuration — used for both default and user-defined agents. */
+export interface AgentModelInfo {
+  agent?: string;
+  override?: string;
+  selected?: string;
+}
+
 export interface AgentConfig {
   name: string;
   displayName?: string;
@@ -71,6 +77,7 @@ export interface AgentRecord {
   promise?: Promise<string>;
   groupId?: string;
   joinMode?: JoinMode;
+  modelInfo?: AgentModelInfo;
   /** Set when result was already consumed via get_subagent_result — suppresses completion notification. */
   resultConsumed?: boolean;
   /** Steering messages queued before the session was ready. */
@@ -100,6 +107,7 @@ export interface NotificationDetails {
   outputFile?: string;
   error?: string;
   resultPreview: string;
+  modelInfo?: AgentModelInfo;
   /** Additional agents in a group notification. */
   others?: NotificationDetails[];
 }

@@ -10,7 +10,7 @@ import { randomUUID } from "node:crypto";
 import type { Model } from "@mariozechner/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
-import type { AgentRecord, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
+import type { AgentModelInfo, AgentRecord, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
 import { cleanupWorktree, createWorktree, pruneWorktrees, } from "./worktree.js";
 
 export type OnAgentComplete = (record: AgentRecord) => void;
@@ -30,6 +30,7 @@ interface SpawnArgs {
 interface SpawnOptions {
   description: string;
   model?: Model<any>;
+  modelInfo?: AgentModelInfo;
   maxTurns?: number;
   isolated?: boolean;
   inheritContext?: boolean;
@@ -96,6 +97,7 @@ export class AgentManager {
       type,
       description: options.description,
       status: options.isBackground ? "queued" : "running",
+      modelInfo: options.modelInfo,
       toolUses: 0,
       startedAt: Date.now(),
       abortController,

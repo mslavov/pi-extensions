@@ -19,6 +19,7 @@ import { getAgentConfig, getConfig, getMemoryTools, getReadOnlyMemoryTools, getT
 import { buildParentContext, extractText } from "./context.js";
 import { detectEnv } from "./env.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
+import { resolveSubagentModelSelection } from "./model-selection.js";
 import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
 import type { SubagentType, ThinkingLevel } from "./types.js";
@@ -47,37 +48,6 @@ let graceTurns = 5;
 export function getGraceTurns(): number { return graceTurns; }
 /** Set the grace turns value (minimum 1). */
 export function setGraceTurns(n: number): void { graceTurns = Math.max(1, n); }
-
-/**
- * Try to find the right model for an agent type.
- * Priority: explicit option > config.model > parent model.
- */
-function resolveDefaultModel(
-  parentModel: Model<any> | undefined,
-  registry: { find(provider: string, modelId: string): Model<any> | undefined; getAvailable?(): Model<any>[] },
-  configModel?: string,
-): Model<any> | undefined {
-  if (configModel) {
-    const slashIdx = configModel.indexOf("/");
-    if (slashIdx !== -1) {
-      const provider = configModel.slice(0, slashIdx);
-      const modelId = configModel.slice(slashIdx + 1);
-
-      // Build a set of available model keys for fast lookup
-      const available = registry.getAvailable?.();
-      const availableKeys = available
-        ? new Set(available.map((m: any) => `${m.provider}/${m.id}`))
-        : undefined;
-      const isAvailable = (p: string, id: string) =>
-        !availableKeys || availableKeys.has(`${p}/${id}`);
-
-      const found = registry.find(provider, modelId);
-      if (found && isAvailable(provider, modelId)) return found;
-    }
-  }
-
-  return parentModel;
-}
 
 /** Info about a tool event in the subagent. */
 export interface ToolActivity {
@@ -247,12 +217,26 @@ export async function runAgent(
   await loader.reload();
 
   // Resolve model: explicit option > config.model > parent model
-  const model = options.model ?? resolveDefaultModel(
-    ctx.model, ctx.modelRegistry, agentConfig?.model,
-  );
+  let model = options.model;
+  let tierThinking: ThinkingLevel | undefined;
+  if (!model) {
+    const selection = await resolveSubagentModelSelection({
+      modelInput: agentConfig?.model,
+      modelFromParams: false,
+      parentModel: ctx.model,
+      registry: ctx.modelRegistry,
+      cwd: effectiveCwd,
+      subagentType: type,
+      description: agentConfig?.description ?? config.description,
+      prompt,
+      signal: options.signal,
+    });
+    model = selection.model;
+    tierThinking = selection.tierThinking;
+  }
 
-  // Resolve thinking level: explicit option > agent config > undefined (inherit)
-  const thinkingLevel = options.thinkingLevel ?? agentConfig?.thinking;
+  // Resolve thinking level: explicit option > agent config > tier thinking > undefined (inherit)
+  const thinkingLevel = options.thinkingLevel ?? agentConfig?.thinking ?? tierThinking;
 
   // Start with extension tools only when supported, then apply the exact active tool list below.
   // Older SDK versions ignore noTools and are still corrected by setActiveToolsByName().

@@ -23,15 +23,17 @@ import { registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { GroupJoinManager } from "./group-join.js";
 import { resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
+import { isReservedModelValue, resolveSubagentModelSelection } from "./model-selection.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { createOutputFilePath, streamToOutputFile, writeInitialEntry } from "./output-file.js";
-import { type AgentConfig, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType } from "./types.js";
+import { type AgentConfig, type AgentModelInfo, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType } from "./types.js";
 import {
   type AgentActivity,
   type AgentDetails,
   AgentWidget,
   describeActivity,
   formatDuration,
+  formatModelInfoParts,
   formatMs,
   formatTokens,
   formatTurns,
@@ -52,6 +54,11 @@ function textResult(msg: string, details?: AgentDetails) {
 function safeFormatTokens(session: { getSessionStats(): { tokens: { total: number } } } | undefined): string {
   if (!session) return "";
   try { return formatTokens(session.getSessionStats().tokens.total); } catch { return ""; }
+}
+
+function formatSelectedModel(model: { provider?: string; id?: string } | undefined): string | undefined {
+  if (!model?.id) return undefined;
+  return model.provider ? `${model.provider}/${model.id}` : model.id;
 }
 
 /**
@@ -149,7 +156,7 @@ function formatTaskNotification(record: AgentRecord, resultMaxLen: number): stri
 
 /** Build AgentDetails from a base + record-specific fields. */
 function buildDetails(
-  base: Pick<AgentDetails, "displayName" | "description" | "subagentType" | "modelName" | "tags">,
+  base: Pick<AgentDetails, "displayName" | "description" | "subagentType" | "modelInfo" | "tags">,
   record: { toolUses: number; startedAt: number; completedAt?: number; status: string; error?: string; id?: string; session?: any },
   activity?: AgentActivity,
   overrides?: Partial<AgentDetails>,
@@ -186,6 +193,7 @@ function buildNotificationDetails(record: AgentRecord, resultMaxLen: number, act
     durationMs: record.completedAt ? record.completedAt - record.startedAt : 0,
     outputFile: record.outputFile,
     error: record.error,
+    modelInfo: record.modelInfo,
     resultPreview: record.result
       ? record.result.length > resultMaxLen
         ? record.result.slice(0, resultMaxLen) + "…"
@@ -213,7 +221,7 @@ export default function (pi: ExtensionAPI) {
         let line = `${icon} ${theme.bold(d.description)} ${theme.fg("dim", statusText)}`;
 
         // Line 2: stats
-        const parts: string[] = [];
+        const parts: string[] = formatModelInfoParts(d.modelInfo);
         if (d.turnCount > 0) parts.push(formatTurns(d.turnCount, d.maxTurns));
         if (d.toolUses > 0) parts.push(`${d.toolUses} tool use${d.toolUses === 1 ? "" : "s"}`);
         if (d.totalTokens > 0) parts.push(formatTokens(d.totalTokens));
@@ -645,7 +653,7 @@ Reminder: prefer direct read/grep/find/bash for simple directed file or code loo
     model: Type.Optional(
       Type.String({
         description:
-          'Optional model override. Accepts "provider/modelId" or fuzzy name (e.g. "haiku", "sonnet"). Omit to use the agent type\'s default.',
+          'Optional model override. Accepts reserved values "inherit", "auto", "high", "medium", "low", or a provider/modelId / fuzzy model name (e.g. "haiku", "sonnet"). Tier values resolve through ordered candidates in model-tiers.json. Omit to use the agent type\'s default.',
       }),
     ),
     thinking: Type.Optional(
@@ -711,7 +719,7 @@ Custom agents can be defined in .pi/agents/<name>.md (project) or ~/.pi/agent/ag
 - Agent results are returned as text; summarize relevant findings for the user.
 - Use resume with an agent ID to continue a previous agent's work.
 - Use steer_subagent to send mid-run messages to a running background agent.
-- Use model to specify a different model (as "provider/modelId", or fuzzy e.g. "haiku", "sonnet").
+- Use model to specify "inherit", "auto", "high", "medium", "low", or a model name ("provider/modelId" or fuzzy e.g. "haiku", "sonnet"). Tier values use ordered candidates from ~/.pi/agent/model-tiers.json and <cwd>/.pi/model-tiers.json.
 - Use thinking to control extended thinking level.
 - Use inherit_context when the agent truly needs the parent conversation history; otherwise include the needed context in prompt.
 - Use isolation: "worktree" to run the agent in an isolated git worktree for safe parallel file modifications.
@@ -744,10 +752,8 @@ Custom agents can be defined in .pi/agents/<name>.md (project) or ~/.pi/agent/ag
         return new Text(text, 0, 0);
       }
 
-      // Helper: build "haiku · thinking: high · ⟳5≤30 · 3 tool uses · 33.8k tokens" stats string
       const stats = (d: AgentDetails) => {
-        const parts: string[] = [];
-        if (d.modelName) parts.push(d.modelName);
+        const parts: string[] = formatModelInfoParts(d.modelInfo);
         if (d.tags) parts.push(...d.tags);
         if (d.turnCount != null && d.turnCount > 0) {
           parts.push(formatTurns(d.turnCount, d.maxTurns));
@@ -768,7 +774,10 @@ Custom agents can be defined in .pi/agents/<name>.md (project) or ~/.pi/agent/ag
 
       // ---- Background agent launched ----
       if (details.status === "background") {
-        return new Text(theme.fg("dim", `  ⎿  Running in background (ID: ${details.agentId})`), 0, 0);
+        const s = stats(details);
+        let line = theme.fg("dim", `  ⎿  Running in background (ID: ${details.agentId})`);
+        if (s) line += "\n  " + s;
+        return new Text(line, 0, 0);
       }
 
       // ---- Completed / Steered ----
@@ -840,31 +849,34 @@ Custom agents can be defined in .pi/agents/<name>.md (project) or ~/.pi/agent/ag
 
       const resolvedConfig = resolveAgentInvocationConfig(customConfig, params);
 
-      // Resolve model from agent config first; tool-call params only fill gaps.
-      let model = ctx.model;
-      if (resolvedConfig.modelInput) {
-        const resolved = resolveModel(resolvedConfig.modelInput, ctx.modelRegistry);
-        if (typeof resolved === "string") {
-          if (resolvedConfig.modelFromParams) return textResult(resolved);
-          // config-specified: silent fallback to parent
-        } else {
-          model = resolved;
-        }
-      }
+      const modelSelection = await resolveSubagentModelSelection({
+        modelInput: resolvedConfig.modelInput,
+        modelFromParams: resolvedConfig.modelFromParams,
+        parentModel: ctx.model,
+        registry: ctx.modelRegistry,
+        cwd: ctx.cwd,
+        subagentType,
+        description: params.description,
+        prompt: params.prompt,
+        signal,
+      });
+      if (modelSelection.error) return textResult(modelSelection.error);
 
-      const thinking = resolvedConfig.thinking;
+      const model = modelSelection.model;
+      const thinking = resolvedConfig.thinking ?? modelSelection.tierThinking;
       const inheritContext = resolvedConfig.inheritContext;
       const runInBackground = resolvedConfig.runInBackground;
       const isolated = resolvedConfig.isolated;
       const isolation = resolvedConfig.isolation;
 
+      const modelInfo: AgentModelInfo = {
+        agent: resolvedConfig.agentModelInput ?? "inherit",
+        override: resolvedConfig.overrideModelInput,
+        selected: formatSelectedModel(modelSelection.model),
+      };
+
       // Build display tags for non-default config
-      const parentModelId = ctx.model?.id;
-      const effectiveModelId = model?.id;
-      const agentModelName = effectiveModelId && effectiveModelId !== parentModelId
-        ? (model?.name ?? effectiveModelId).replace(/^Claude\s+/i, "").toLowerCase()
-        : undefined;
-      const agentTags: string[] = [];
+      const agentTags: string[] = [...modelSelection.tags];
       const modeLabel = getPromptModeLabel(subagentType);
       if (modeLabel) agentTags.push(modeLabel);
       if (thinking) agentTags.push(`thinking: ${thinking}`);
@@ -876,7 +888,7 @@ Custom agents can be defined in .pi/agents/<name>.md (project) or ~/.pi/agent/ag
         displayName,
         description: params.description,
         subagentType,
-        modelName: agentModelName,
+        modelInfo,
         tags: agentTags.length > 0 ? agentTags : undefined,
       };
 
@@ -895,7 +907,7 @@ Custom agents can be defined in .pi/agents/<name>.md (project) or ~/.pi/agent/ag
         }
         return textResult(
           record.result?.trim() || record.error?.trim() || "No output.",
-          buildDetails(detailBase, record),
+          buildDetails({ ...detailBase, modelInfo: existing.modelInfo }, record),
         );
       }
 
@@ -919,6 +931,7 @@ Custom agents can be defined in .pi/agents/<name>.md (project) or ~/.pi/agent/ag
         id = manager.spawn(pi, ctx, subagentType, params.prompt, {
           description: params.description,
           model,
+          modelInfo,
           maxTurns: effectiveMaxTurns,
           isolated,
           inheritContext,
@@ -1027,6 +1040,7 @@ Custom agents can be defined in .pi/agents/<name>.md (project) or ~/.pi/agent/ag
       const record = await manager.spawnAndWait(pi, ctx, subagentType, params.prompt, {
         description: params.description,
         model,
+        modelInfo,
         maxTurns: effectiveMaxTurns,
         isolated,
         inheritContext,
@@ -1200,6 +1214,7 @@ Custom agents can be defined in .pi/agents/<name>.md (project) or ~/.pi/agent/ag
   function getModelLabel(type: string, registry?: ModelRegistry): string {
     const cfg = getAgentConfig(type);
     if (!cfg?.model) return "inherit";
+    if (isReservedModelValue(cfg.model)) return cfg.model;
     // If registry provided, check if the model actually resolves
     if (registry) {
       const resolved = resolveModel(cfg.model, registry);
@@ -1571,7 +1586,7 @@ The file format is a markdown file with YAML frontmatter and a system prompt bod
 ---
 description: <one-line description shown in UI>
 tools: <comma-separated built-in tools: read, bash, edit, write, grep, find, ls. Use "none" for no tools. Omit for all tools>
-model: <optional model as "provider/modelId", e.g. "anthropic/claude-haiku-4-5-20251001". Omit to inherit parent model>
+model: <optional model: inherit | auto | high | medium | low | provider/modelId or fuzzy model name. Tier values use ordered candidates from model-tiers.json. Omit to inherit parent model>
 thinking: <optional thinking level: off, minimal, low, medium, high, xhigh. Omit to inherit>
 max_turns: <optional max agentic turns. 0 or omit for unlimited (default)>
 prompt_mode: <"replace" (body IS the full system prompt) or "append" (body is appended to default prompt). Default: replace>
@@ -1646,21 +1661,21 @@ Write the file using the write tool. Only write the file, nothing else.`;
 
     // 4. Model
     const modelChoice = await ctx.ui.select("Model", [
-      "inherit (parent model)",
-      "haiku",
-      "sonnet",
-      "opus",
+      "inherit",
+      "auto",
+      "high",
+      "medium",
+      "low",
       "custom...",
     ]);
     if (!modelChoice) return;
 
     let modelLine = "";
-    if (modelChoice === "haiku") modelLine = "\nmodel: anthropic/claude-haiku-4-5-20251001";
-    else if (modelChoice === "sonnet") modelLine = "\nmodel: anthropic/claude-sonnet-4-6";
-    else if (modelChoice === "opus") modelLine = "\nmodel: anthropic/claude-opus-4-6";
-    else if (modelChoice === "custom...") {
-      const customModel = await ctx.ui.input("Model (provider/modelId)");
+    if (modelChoice === "custom...") {
+      const customModel = await ctx.ui.input("Model (provider/modelId or fuzzy name)");
       if (customModel) modelLine = `\nmodel: ${customModel}`;
+    } else if (modelChoice !== "inherit") {
+      modelLine = `\nmodel: ${modelChoice}`;
     }
 
     // 5. Thinking
