@@ -18,6 +18,7 @@ const calls = {
   SettingsManagerCreate: [] as any[],
   SessionManagerInMemory: [] as any[],
   createAgentSession: [] as any[],
+  setActiveToolsByName: [] as any[],
   detectEnv: [] as any[],
   preloadSkills: [] as any[],
   getToolsForType: [] as any[],
@@ -30,11 +31,11 @@ const calls = {
 vi.mock("@mariozechner/pi-coding-agent", () => {
   const mockSession = {
     messages: [],
-    getActiveToolNames: () => ["read", "bash"],
-    setActiveToolsByName: vi.fn(),
+    getActiveToolNames: () => ["read", "bash", "Agent", "ext_tool"],
+    setActiveToolsByName: vi.fn((toolNames: string[]) => calls.setActiveToolsByName.push(toolNames)),
     subscribe: vi.fn(() => vi.fn()),
     abort: vi.fn(),
-    run: vi.fn(async () => {}),
+    prompt: vi.fn(async () => {}),
     bindExtensions: vi.fn(async () => {}),
     getSessionStats: () => ({ tokens: { total: 0 } }),
   };
@@ -134,7 +135,7 @@ vi.mock("../agent-types.js", () => ({
     if (typeof cwd !== "string") {
       throw new TypeError(`cwd must be a string, got ${typeof cwd}`);
     }
-    return [{ name: "read" }, { name: "bash" }];
+    return ["read", "bash"];
   },
   getMemoryTools: () => [],
   getReadOnlyMemoryTools: () => [],
@@ -192,12 +193,7 @@ describe("agent-runner path safety", () => {
     const ctx = makeCtx("/Users/test/project");
     const pi = makePi();
 
-    // Will throw on session.run() but we catch — we're testing the setup phase
-    try {
-      await runAgent(ctx, "Explore", "test prompt", { pi });
-    } catch {
-      // session.run() is mocked minimally, may throw
-    }
+    await runAgent(ctx, "Explore", "test prompt", { pi });
 
     // DefaultResourceLoader should get cwd + agentDir as strings
     expect(calls.DefaultResourceLoader.length).toBeGreaterThan(0);
@@ -233,17 +229,27 @@ describe("agent-runner path safety", () => {
     expect(typeof calls.buildAgentPrompt[0].cwd).toBe("string");
   });
 
+  it("activates tools by name instead of passing tool objects to createAgentSession", async () => {
+    const { runAgent } = await import("../agent-runner.js");
+    const ctx = makeCtx("/Users/test/project");
+    const pi = makePi();
+
+    await runAgent(ctx, "Explore", "test prompt", { pi });
+
+    const sessionOpts = calls.createAgentSession[0];
+    expect(sessionOpts.tools).toBeUndefined();
+    expect(sessionOpts.noTools).toBe("builtin");
+    expect(calls.setActiveToolsByName[0]).toEqual(["read", "bash", "ext_tool"]);
+    expect(calls.setActiveToolsByName[0].every((name: unknown) => typeof name === "string")).toBe(true);
+  });
+
   it("uses options.cwd when provided (worktree isolation)", async () => {
     const { runAgent } = await import("../agent-runner.js");
     const ctx = makeCtx("/Users/test/project");
     const pi = makePi();
     const worktreeCwd = "/tmp/worktree-abc123";
 
-    try {
-      await runAgent(ctx, "Explore", "test prompt", { pi, cwd: worktreeCwd });
-    } catch {
-      // expected
-    }
+    await runAgent(ctx, "Explore", "test prompt", { pi, cwd: worktreeCwd });
 
     // All path calls should use the worktree cwd, not ctx.cwd
     expect(calls.DefaultResourceLoader[0].cwd).toBe(worktreeCwd);
@@ -257,11 +263,7 @@ describe("agent-runner path safety", () => {
     const ctx = makeCtx("/Users/test/workspace");
     const pi = makePi();
 
-    try {
-      await runAgent(ctx, "general-purpose", "do stuff", { pi });
-    } catch {
-      // expected
-    }
+    await runAgent(ctx, "general-purpose", "do stuff", { pi });
 
     // SettingsManager.create() must receive cwd
     const smCall = calls.SettingsManagerCreate[0];
@@ -273,11 +275,7 @@ describe("agent-runner path safety", () => {
     const ctx = makeCtx("/valid/path");
     const pi = makePi();
 
-    try {
-      await runAgent(ctx, "Plan", "plan something", { pi, isolated: true });
-    } catch {
-      // expected
-    }
+    await runAgent(ctx, "Plan", "plan something", { pi, isolated: true });
 
     // Check no call received undefined for cwd
     for (const loaderCall of calls.DefaultResourceLoader) {

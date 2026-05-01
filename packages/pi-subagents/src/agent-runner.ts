@@ -185,12 +185,12 @@ export async function runAgent(
     }
   }
 
-  let tools = getToolsForType(type, effectiveCwd);
+  let toolNames = getToolsForType(type, effectiveCwd);
 
   // Persistent memory: detect write capability and branch accordingly.
   // Account for disallowedTools — a tool in the base set but on the denylist is not truly available.
   if (agentConfig?.memory) {
-    const existingNames = new Set(tools.map(t => t.name));
+    const existingNames = new Set(toolNames);
     const denied = agentConfig.disallowedTools ? new Set(agentConfig.disallowedTools) : undefined;
     const effectivelyHas = (name: string) => existingNames.has(name) && !denied?.has(name);
     const hasWriteTools = effectivelyHas("write") || effectivelyHas("edit");
@@ -198,13 +198,13 @@ export async function runAgent(
     if (hasWriteTools) {
       // Read-write memory: add any missing memory tools (read/write/edit)
       const memTools = getMemoryTools(effectiveCwd, existingNames);
-      if (memTools.length > 0) tools = [...tools, ...memTools];
+      if (memTools.length > 0) toolNames = [...toolNames, ...memTools];
       extras.memoryBlock = buildMemoryBlock(agentConfig.name, agentConfig.memory, effectiveCwd);
     } else {
       // Read-only memory: only add read tool, use read-only prompt
       if (!existingNames.has("read")) {
         const readTools = getReadOnlyMemoryTools(effectiveCwd, existingNames);
-        if (readTools.length > 0) tools = [...tools, ...readTools];
+        if (readTools.length > 0) toolNames = [...toolNames, ...readTools];
       }
       extras.memoryBlock = buildReadOnlyMemoryBlock(agentConfig.name, agentConfig.memory, effectiveCwd);
     }
@@ -254,13 +254,15 @@ export async function runAgent(
   // Resolve thinking level: explicit option > agent config > undefined (inherit)
   const thinkingLevel = options.thinkingLevel ?? agentConfig?.thinking;
 
+  // Start with extension tools only when supported, then apply the exact active tool list below.
+  // Older SDK versions ignore noTools and are still corrected by setActiveToolsByName().
   const sessionOpts: Record<string, unknown> = {
     cwd: effectiveCwd,
     sessionManager: SessionManager.inMemory(effectiveCwd),
     settingsManager: SettingsManager.create(effectiveCwd, join(homedir(), ".pi", "agent")),
     modelRegistry: ctx.modelRegistry,
     model,
-    tools,
+    noTools: "builtin",
     resourceLoader: loader,
   };
   if (thinkingLevel) {
@@ -276,24 +278,20 @@ export async function runAgent(
     : undefined;
 
   // Filter active tools: remove our own tools to prevent nesting,
-  // apply extension allowlist if specified, and apply disallowedTools denylist
-  if (extensions !== false) {
-    const builtinToolNames = new Set(tools.map(t => t.name));
-    const activeTools = session.getActiveToolNames().filter((t) => {
-      if (EXCLUDED_TOOL_NAMES.includes(t)) return false;
-      if (disallowedSet?.has(t)) return false;
-      if (builtinToolNames.has(t)) return true;
-      if (Array.isArray(extensions)) {
-        return extensions.some(ext => t.startsWith(ext) || t.includes(ext));
-      }
-      return true;
-    });
-    session.setActiveToolsByName(activeTools);
-  } else if (disallowedSet) {
-    // Even with extensions disabled, apply denylist to built-in tools
-    const activeTools = session.getActiveToolNames().filter(t => !disallowedSet.has(t));
-    session.setActiveToolsByName(activeTools);
-  }
+  // apply extension allowlist if specified, and apply disallowedTools denylist.
+  const builtinToolNames = new Set(toolNames);
+  const activeToolCandidates = [...new Set([...toolNames, ...session.getActiveToolNames()])];
+  const activeTools = activeToolCandidates.filter((t) => {
+    if (EXCLUDED_TOOL_NAMES.includes(t)) return false;
+    if (disallowedSet?.has(t)) return false;
+    if (builtinToolNames.has(t)) return true;
+    if (extensions === false) return false;
+    if (Array.isArray(extensions)) {
+      return extensions.some(ext => t.startsWith(ext) || t.includes(ext));
+    }
+    return true;
+  });
+  session.setActiveToolsByName(activeTools);
 
   // Bind extensions so that session_start fires and extensions can initialize
   // (e.g. loading credentials, setting up state). Placed after tool filtering
