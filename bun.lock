@@ -98,6 +98,17 @@
         "@mariozechner/pi-coding-agent": "*",
       },
     },
+    "packages/pi-showboat": {
+      "name": "pi-showboat",
+      "version": "0.1.0",
+      "devDependencies": {
+        "typescript": "^6.0.2",
+      },
+      "peerDependencies": {
+        "@mariozechner/pi-ai": "*",
+        "@mariozechner/pi-coding-agent": "*",
+      },
+    },
     "packages/pi-subagents": {
       "name": "pi-subagents",
       "version": "0.5.2-patched.1",
@@ -690,6 +701,8 @@
     "pi-powerline": ["pi-powerline@workspace:packages/pi-powerline"],
 
     "pi-progressive-context": ["pi-progressive-context@workspace:packages/pi-progressive-context"],
+
+    "pi-showboat": ["pi-showboat@workspace:packages/pi-showboat"],
 
     "pi-subagents": ["pi-subagents@workspace:packages/pi-subagents"],
 
