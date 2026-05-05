@@ -212,6 +212,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		} else if (choice === "Refine the plan") {
 			const refinement = await ctx.ui.editor("Describe what to change:", "");
 			if (refinement?.trim()) {
+				planPresentedThisAgent = false;
 				sendUserMessage(ctx, refinement.trim());
 			}
 		} else if (choice === "Exit plan mode") {
@@ -344,37 +345,41 @@ Goal: Write your final plan to the plan file (the only file you can edit).
 		return `## Plan Workflow
 
 ### Phase 1: Initial Understanding
-Goal: Understand the user's request and the relevant code. Use direct read-only tools for quick targeted checks, but delegate broader exploration to ${EXPLORE_AGENT} agents.
+Goal: Understand the user's request and gather relevant evidence without polluting the main context.
 
-1. Focus on the user's request and the associated code paths. Search for existing functions, utilities, and patterns to reuse before proposing new code.
+1. Focus on the user's intent, constraints, and likely code paths. Use direct read-only tools only for quick targeted checks needed to brief ${EXPLORE_AGENT} agents.
 2. Launch 1-3 ${EXPLORE_AGENT} agents to explore efficiently.
    - Use 1 agent when the task is isolated to known files, specific paths, or a small targeted change.
    - Use multiple agents when scope is uncertain, multiple areas are involved, or you need to understand existing patterns before planning.
    - If using multiple agents, give each a specific search focus and set run_in_background: true. Collect results with get_subagent_result using wait: true.
+   - Ask each ${EXPLORE_AGENT} agent to return a concise summary of what it explored, key files/functions, evidence that matters, dead ends or irrelevant areas, and open questions.
    - Quality over quantity: use the minimum number of agents necessary.
    - Do not proceed to Phase 2 until the exploration results you need have completed.
 
 ### Phase 2: Design
-Goal: Design an implementation approach.
+Goal: Design an implementation approach using the exploration summaries.
 
-Launch ${PLAN_AGENT} agent(s) to design the implementation based on the user's intent and your Phase 1 exploration results.
+Launch ${PLAN_AGENT} agent(s) to design the implementation based on the user's intent and the ${EXPLORE_AGENT} results. Forward the exploration summaries to the ${PLAN_AGENT}; do not re-read files yourself just to restate what the ${EXPLORE_AGENT} agents already found.
 
 **Guidelines:**
 - Default: launch at least 1 ${PLAN_AGENT} agent for most non-trivial tasks. It helps validate your understanding and consider trade-offs.
 - Skip ${PLAN_AGENT} agents only for truly trivial tasks like typo fixes, single-line changes, or simple renames.
 - For complex work, launch up to 3 ${PLAN_AGENT} agents in parallel with different perspectives. If launching multiple agents, set run_in_background: true and collect results with get_subagent_result using wait: true.
+- Instruct ${PLAN_AGENT} agents to rely on the provided exploration summaries first and perform only targeted reads when a specific detail is missing, ambiguous, or conflicting.
 - Do not write the final plan until the design results you need have completed.
 
 In each ${PLAN_AGENT} prompt:
-- Provide the relevant Phase 1 findings, including filenames and code path traces
+- Provide the relevant Phase 1 summaries, including filenames, code path traces, dead ends, and open questions
 - Describe requirements and constraints
 - Request a concrete implementation plan with critical files and verification steps
 
 ### Phase 3: Review
-Goal: Review the ${PLAN_AGENT} output and ensure alignment with the user's intent.
-1. Read the critical files identified by agents to deepen your understanding.
-2. Synthesize a single recommended approach.
-3. Use ask_user to clarify any remaining requirements or decisions that cannot be resolved from code.
+Goal: Validate the ${PLAN_AGENT} output against the user's intent and the exploration evidence.
+1. Check whether the recommended plan solves the user's actual request and respects known constraints.
+2. Do not re-read files by default. Re-read only when the plan conflicts with exploration findings, depends on a code detail missing from the summaries, contains an unsupported claim, or needs exact line-level context.
+3. Prefer targeted follow-up prompts to ${EXPLORE_AGENT} or ${PLAN_AGENT} agents over broad direct exploration.
+4. Synthesize a single recommended approach.
+5. Use ask_user to clarify any remaining requirements or decisions that cannot be resolved from code.
 
 ${buildPlanFileStructureInstructions()}
 
@@ -500,7 +505,7 @@ Use ask_user ONLY to clarify requirements or choose between approaches BEFORE fi
 					onUpdate?.({ content: [{ type: "text" as const, text }], details: undefined });
 				},
 			});
-			return { content: [{ type: "text" as const, text: preview ?? "Plan mode exited." }], details: undefined };
+			return { content: [{ type: "text" as const, text: preview ?? "Plan mode exited." }], details: undefined, terminate: true };
 		},
 	});
 

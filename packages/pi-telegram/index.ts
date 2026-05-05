@@ -161,6 +161,12 @@ interface TelegramMediaGroupState {
 	flushTimer?: ReturnType<typeof setTimeout>;
 }
 
+interface TelegramProgressSendResult {
+	sent: boolean;
+	message?: string;
+	reason?: string;
+}
+
 const TELEGRAM_DIR = join(homedir(), ".pi", "agent", "extensions", "telegram");
 const OLD_CONFIG_PATH = join(homedir(), ".pi", "agent", "telegram.json");
 const CONFIG_PATH = join(TELEGRAM_DIR, "telegram.json");
@@ -172,6 +178,9 @@ const MAX_ATTACHMENTS_PER_TURN = 10;
 const PREVIEW_THROTTLE_MS = 750;
 const TELEGRAM_DRAFT_ID_MAX = 2_147_483_647;
 const TELEGRAM_MEDIA_GROUP_DEBOUNCE_MS = 1200;
+const TELEGRAM_PROGRESS_MAX_LENGTH = 500;
+const TELEGRAM_ERROR_NOTIFY_DELAY_MS = 20_000;
+const TELEGRAM_ERROR_MAX_LENGTH = 1500;
 const OWNER_HEARTBEAT_MS = 5_000;
 const OWNER_LEASE_TTL_MS = 15_000;
 
@@ -396,6 +405,7 @@ export default function (pi: ExtensionAPI) {
 	let preserveQueuedTurnsAsHistory = false;
 	let setupInProgress = false;
 	let previewState: TelegramPreviewState | undefined;
+	let pendingLocalErrorTimer: ReturnType<typeof setTimeout> | undefined;
 	let draftSupport: "unknown" | "supported" | "unsupported" = "unknown";
 	let nextDraftId = 0;
 	const mediaGroups = new Map<string, TelegramMediaGroupState>();
@@ -701,6 +711,65 @@ export default function (pi: ExtensionAPI) {
 			lastMessageId = sent.message_id;
 		}
 		return lastMessageId;
+	}
+
+	function getProgressChatId(): number | undefined {
+		return activeTelegramTurn?.chatId ?? config.allowedUserId;
+	}
+
+	function getProgressUnavailableReason(): string | undefined {
+		if (!config.botToken) return "Telegram bot token is not configured";
+		if (!pollingPromise) return "Telegram bridge is not connected";
+		if (!config.allowedUserId) return "Telegram bridge is not paired";
+		return undefined;
+	}
+
+	function clampProgressText(text: string): string {
+		const normalized = text.trim().replace(/\s+/g, " ");
+		return normalized.length > TELEGRAM_PROGRESS_MAX_LENGTH ? normalized.slice(0, TELEGRAM_PROGRESS_MAX_LENGTH).trimEnd() : normalized;
+	}
+
+	async function sendTelegramProgress(text: string): Promise<TelegramProgressSendResult> {
+		const message = clampProgressText(text);
+		if (!message) return { sent: false, reason: "Progress message is empty" };
+
+		const unavailableReason = getProgressUnavailableReason();
+		if (unavailableReason) return { sent: false, message, reason: unavailableReason };
+
+		const chatId = getProgressChatId();
+		if (chatId === undefined) return { sent: false, message, reason: "Telegram progress chat is unknown" };
+
+		try {
+			await sendTextReply(chatId, 0, message);
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : String(error);
+			return { sent: false, message, reason };
+		}
+
+		return { sent: true, message };
+	}
+
+	function clearPendingLocalErrorNotification(): void {
+		if (!pendingLocalErrorTimer) return;
+		clearTimeout(pendingLocalErrorTimer);
+		pendingLocalErrorTimer = undefined;
+	}
+
+	function formatLocalErrorNotification(errorMessage: string): string {
+		const normalized = errorMessage.trim().replace(/\s+/g, " ");
+		const clipped =
+			normalized.length > TELEGRAM_ERROR_MAX_LENGTH ? `${normalized.slice(0, TELEGRAM_ERROR_MAX_LENGTH).trimEnd()}…` : normalized;
+		return `Pi stopped with an error:\n${clipped || "Unknown error"}\n\nReply with what I should do next.`;
+	}
+
+	function scheduleLocalErrorNotification(errorMessage: string): void {
+		clearPendingLocalErrorNotification();
+		pendingLocalErrorTimer = setTimeout(() => {
+			pendingLocalErrorTimer = undefined;
+			const chatId = getProgressChatId();
+			if (getProgressUnavailableReason() || chatId === undefined) return;
+			void sendTextReply(chatId, 0, formatLocalErrorNotification(errorMessage)).catch(() => undefined);
+		}, TELEGRAM_ERROR_NOTIFY_DELAY_MS);
 	}
 
 	async function sendQueuedAttachments(turn: ActiveTelegramTurn): Promise<void> {
@@ -1168,6 +1237,33 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerTool({
+		name: "telegram_progress",
+		label: "Telegram Progress",
+		description: "Send a brief progress or key-point update to the connected Telegram chat for the active pi session.",
+		promptSnippet: "Send a brief progress or key-point update to the connected Telegram chat.",
+		promptGuidelines: [
+			"Use telegram_progress when the Telegram bridge is connected and the session was started locally, for meaningful milestones, blockers, or long-running work.",
+			"Keep telegram_progress messages short and do not include secrets, tokens, raw command output, or repetitive status.",
+			"Do not use telegram_progress for Telegram-originated turns unless the user explicitly asks, because those turns already stream previews.",
+		],
+		parameters: Type.Object({
+			message: Type.String({ description: "Brief progress update to send", minLength: 1, maxLength: TELEGRAM_PROGRESS_MAX_LENGTH }),
+		}),
+		async execute(_toolCallId, params) {
+			const result = await sendTelegramProgress(params.message);
+			return {
+				content: [
+					{
+						type: "text",
+						text: result.sent ? "Sent Telegram progress update." : `Skipped Telegram progress update: ${result.reason ?? "unavailable"}.`,
+					},
+				],
+				details: result,
+			};
+		},
+	});
+
 	pi.registerCommand("telegram-setup", {
 		description: "Configure Telegram bot token",
 		handler: async (_args, ctx) => {
@@ -1187,6 +1283,7 @@ export default function (pi: ExtensionAPI) {
 				`allowed user: ${config.allowedUserId ?? "not paired"}`,
 				`polling: ${pollingPromise ? "running" : "stopped"}`,
 				`owner: ${ownerStatus}`,
+				`progress target: ${getProgressChatId() !== undefined ? "known" : "unknown"}`,
 				`config: ${CONFIG_PATH}`,
 				`active telegram turn: ${activeTelegramTurn ? "yes" : "no"}`,
 				`queued telegram turns: ${queuedTelegramTurns.length}`,
@@ -1246,6 +1343,7 @@ export default function (pi: ExtensionAPI) {
 			if (state.flushTimer) clearTimeout(state.flushTimer);
 		}
 		mediaGroups.clear();
+		clearPendingLocalErrorNotification();
 		if (activeTelegramTurn) {
 			await clearPreview(activeTelegramTurn.chatId);
 		}
@@ -1256,16 +1354,17 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("before_agent_start", async (event) => {
-		const suffix = isTelegramPrompt(event.prompt)
-			? `${SYSTEM_PROMPT_SUFFIX}\n- The current user message came from Telegram.`
-			: SYSTEM_PROMPT_SUFFIX;
+		const progressGuidance = isTelegramPrompt(event.prompt)
+			? "- The current user message came from Telegram. Do not call telegram_progress unless the user explicitly asks; Telegram-originated turns already stream previews."
+			: "- When the Telegram bridge is connected and this session was started locally, use telegram_progress for meaningful milestones, blockers, or long-running work. Keep updates short and avoid secrets, raw command output, or repetitive status.";
 		return {
-			systemPrompt: event.systemPrompt + suffix,
+			systemPrompt: `${event.systemPrompt}${SYSTEM_PROMPT_SUFFIX}\n${progressGuidance}`,
 		};
 	});
 
 	pi.on("agent_start", async (_event, ctx) => {
 		currentAbort = () => ctx.abort();
+		clearPendingLocalErrorNotification();
 		if (!activeTelegramTurn && queuedTelegramTurns.length > 0) {
 			const nextTurn = queuedTelegramTurns.shift();
 			if (nextTurn) {
@@ -1296,13 +1395,20 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("agent_end", async (event, ctx) => {
 		const turn = activeTelegramTurn;
+		const assistant = extractAssistantText(event.messages);
 		currentAbort = undefined;
 		stopTypingLoop();
 		activeTelegramTurn = undefined;
 		updateStatus(ctx);
-		if (!turn) return;
+		if (!turn) {
+			if (assistant.stopReason === "error") {
+				scheduleLocalErrorNotification(assistant.errorMessage || "Unknown error");
+			} else {
+				clearPendingLocalErrorNotification();
+			}
+			return;
+		}
 
-		const assistant = extractAssistantText(event.messages);
 		if (assistant.stopReason === "aborted") {
 			await clearPreview(turn.chatId);
 			return;

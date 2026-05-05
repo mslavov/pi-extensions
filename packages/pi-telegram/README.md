@@ -129,6 +129,14 @@ That aborts the active pi turn.
 
 If you send more Telegram messages while pi is busy, they are queued and processed in order.
 
+### Progress updates
+
+The extension exposes a `telegram_progress` tool for brief milestone or blocker updates when the bridge is connected and paired. It is intended for locally started pi sessions; Telegram-originated turns already use the streaming preview.
+
+Progress updates should be short and should not include secrets, raw command output, or repetitive status.
+
+If a locally started pi run stops with an error while Telegram is connected, the extension sends the error to Telegram after a short delay so you can reply with next instructions. Telegram-originated turns still receive errors as their normal reply.
+
 ## Streaming
 
 The extension streams assistant text previews back to Telegram while pi is generating.
@@ -141,6 +149,8 @@ It tries Telegram draft streaming first with `sendMessageDraft`. If that is not 
 - Replies are sent as normal Telegram messages, not quote-replies
 - Long replies are split below Telegram's 4096 character limit
 - Outbound files are sent via `telegram_attach`
+- Manual local-session progress updates are sent via `telegram_progress`
+- Local-session agent errors are sent to Telegram after a short delay when the bridge is connected
 
 ## License
 
