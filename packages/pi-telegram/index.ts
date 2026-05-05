@@ -416,26 +416,45 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function updateStatus(ctx: ExtensionContext, error?: string): void {
-		const theme = ctx.ui.theme;
-		const label = theme.fg("accent", "telegram");
-		if (error) {
-			ctx.ui.setStatus("telegram", `${label} ${theme.fg("error", "error")} ${theme.fg("muted", error)}`);
-			return;
+		try {
+			const theme = ctx.ui.theme;
+			const label = theme.fg("accent", "telegram");
+			if (error) {
+				ctx.ui.setStatus("telegram", `${label} ${theme.fg("error", "error")} ${theme.fg("muted", error)}`);
+				return;
+			}
+			if (!config.botToken || !pollingPromise) {
+				ctx.ui.setStatus("telegram", undefined);
+				return;
+			}
+			if (!config.allowedUserId) {
+				ctx.ui.setStatus("telegram", `${label} ${theme.fg("warning", "awaiting pairing")}`);
+				return;
+			}
+			if (activeTelegramTurn || queuedTelegramTurns.length > 0) {
+				const queued = queuedTelegramTurns.length > 0 ? theme.fg("muted", ` +${queuedTelegramTurns.length} queued`) : "";
+				ctx.ui.setStatus("telegram", `${label} ${theme.fg("accent", "processing")}${queued}`);
+				return;
+			}
+			ctx.ui.setStatus("telegram", `${label} ${theme.fg("success", "connected")}`);
+		} catch (error) {
+			if (isStaleContextError(error)) return;
+			throw error;
 		}
-		if (!config.botToken || !pollingPromise) {
-			ctx.ui.setStatus("telegram", undefined);
-			return;
+	}
+
+	function isStaleContextError(error: unknown): boolean {
+		const message = error instanceof Error ? error.message : String(error);
+		return message.includes("extension ctx is stale") || message.includes("captured pi or command ctx");
+	}
+
+	function sendUserMessageSafely(content: Array<TextContent | ImageContent>): void {
+		try {
+			pi.sendUserMessage(content);
+		} catch (error) {
+			if (isStaleContextError(error)) return;
+			throw error;
 		}
-		if (!config.allowedUserId) {
-			ctx.ui.setStatus("telegram", `${label} ${theme.fg("warning", "awaiting pairing")}`);
-			return;
-		}
-		if (activeTelegramTurn || queuedTelegramTurns.length > 0) {
-			const queued = queuedTelegramTurns.length > 0 ? theme.fg("muted", ` +${queuedTelegramTurns.length} queued`) : "";
-			ctx.ui.setStatus("telegram", `${label} ${theme.fg("accent", "processing")}${queued}`);
-			return;
-		}
-		ctx.ui.setStatus("telegram", `${label} ${theme.fg("success", "connected")}`);
 	}
 
 	function stopOwnerHeartbeat(): void {
@@ -453,7 +472,7 @@ export default function (pi: ExtensionAPI) {
 		ownerConflict = undefined;
 	}
 
-	async function refreshOwnerLease(ctx: ExtensionContext): Promise<void> {
+	async function refreshOwnerLease(cwd: string, ctx: ExtensionContext): Promise<void> {
 		const current = await readOwnerLease();
 		if (!current || current.id !== ownerId) {
 			ownerLease = undefined;
@@ -463,14 +482,22 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		ownerLease = createOwnerLease(ownerId, ctx.cwd, current.claimedAt);
+		ownerLease = createOwnerLease(ownerId, cwd, current.claimedAt);
 		await writeOwnerLease(ownerLease);
 	}
 
 	function startOwnerHeartbeat(ctx: ExtensionContext): void {
 		if (ownerHeartbeatInterval) return;
+		const cwd = ctx.cwd;
 		ownerHeartbeatInterval = setInterval(() => {
-			void refreshOwnerLease(ctx);
+			void refreshOwnerLease(cwd, ctx).catch((error) => {
+				if (isStaleContextError(error)) {
+					stopOwnerHeartbeat();
+					return;
+				}
+				const message = error instanceof Error ? error.message : String(error);
+				updateStatus(ctx, message);
+			});
 		}, OWNER_HEARTBEAT_MS);
 	}
 
@@ -1099,7 +1126,7 @@ export default function (pi: ExtensionAPI) {
 		if (ctx.isIdle()) {
 			startTypingLoop(ctx, turn.chatId);
 			updateStatus(ctx);
-			pi.sendUserMessage(turn.content);
+			sendUserMessageSafely(turn.content);
 		}
 	}
 
@@ -1113,7 +1140,11 @@ export default function (pi: ExtensionAPI) {
 				const state = mediaGroups.get(key);
 				mediaGroups.delete(key);
 				if (!state) return;
-				void dispatchAuthorizedTelegramMessages(state.messages, ctx);
+				void dispatchAuthorizedTelegramMessages(state.messages, ctx).catch((error) => {
+					if (isStaleContextError(error)) return;
+					const message = error instanceof Error ? error.message : String(error);
+					updateStatus(ctx, message);
+				});
 			}, TELEGRAM_MEDIA_GROUP_DEBOUNCE_MS);
 			mediaGroups.set(key, existing);
 			return;
@@ -1182,6 +1213,7 @@ export default function (pi: ExtensionAPI) {
 				}
 			} catch (error) {
 				if (signal.aborted) return;
+				if (isStaleContextError(error)) return;
 				if (error instanceof DOMException && error.name === "AbortError") return;
 				const message = error instanceof Error ? error.message : String(error);
 				updateStatus(ctx, message);
@@ -1363,7 +1395,14 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("agent_start", async (_event, ctx) => {
-		currentAbort = () => ctx.abort();
+		currentAbort = () => {
+			try {
+				ctx.abort();
+			} catch (error) {
+				if (isStaleContextError(error)) return;
+				throw error;
+			}
+		};
 		clearPendingLocalErrorNotification();
 		if (!activeTelegramTurn && queuedTelegramTurns.length > 0) {
 			const nextTurn = queuedTelegramTurns.shift();
@@ -1444,7 +1483,7 @@ export default function (pi: ExtensionAPI) {
 			const nextTurn = queuedTelegramTurns[0];
 			startTypingLoop(ctx, nextTurn.chatId);
 			updateStatus(ctx);
-			pi.sendUserMessage(nextTurn.content);
+			sendUserMessageSafely(nextTurn.content);
 		}
 	});
 }
