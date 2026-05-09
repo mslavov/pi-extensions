@@ -1,8 +1,8 @@
 {
-  "name": "pi-context",
+  "name": "pi-prompt-history",
   "version": "0.1.0",
   "type": "module",
-  "description": "Show current pi context window usage with /context",
+  "description": "Prompt history picker for pi",
   "keywords": ["pi-package"],
   "license": "MIT",
   "author": "Milko Slavov <milko.slavov@gmail.com>",

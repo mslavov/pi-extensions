@@ -28,7 +28,7 @@ const calls = {
 // --- Mocks ---
 
 // Mock pi-coding-agent
-vi.mock("@mariozechner/pi-coding-agent", () => {
+vi.mock("@earendil-works/pi-coding-agent", () => {
   const mockSession = {
     messages: [],
     getActiveToolNames: () => ["read", "bash", "Agent", "ext_tool"],
@@ -93,7 +93,7 @@ vi.mock("@mariozechner/pi-coding-agent", () => {
 });
 
 // Mock pi-ai
-vi.mock("@mariozechner/pi-ai", () => ({ complete: vi.fn() }));
+vi.mock("@earendil-works/pi-ai", () => ({ complete: vi.fn() }));
 
 // Mock internal modules that do I/O
 vi.mock("../env.js", () => ({

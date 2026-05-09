@@ -6,8 +6,8 @@
  * search and merge any gitignored files into the suggestion list.
  */
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import type { AutocompleteProvider, AutocompleteSuggestions, AutocompleteItem } from "@mariozechner/pi-tui";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { AutocompleteProvider, AutocompleteSuggestions, AutocompleteItem } from "@earendil-works/pi-tui";
 import { spawn } from "node:child_process";
 import { accessSync, constants, readFileSync } from "node:fs";
 import { homedir } from "node:os";

@@ -21,7 +21,7 @@ import type {
   TextContent,
   ImageContent,
   ToolCall as PiToolCall,
-} from "@mariozechner/pi-ai";
+} from "@earendil-works/pi-ai";
 
 import type {
   OpenAIMessage,

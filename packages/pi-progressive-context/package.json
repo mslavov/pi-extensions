@@ -15,7 +15,7 @@
     "clean": "echo 'nothing to clean'"
   },
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": "*"
   },
   "devDependencies": {
     "typescript": "^6.0.2"

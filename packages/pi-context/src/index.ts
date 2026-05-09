@@ -12,8 +12,8 @@ import {
 	type Theme,
 	type ThemeColor,
 	type ToolInfo,
-} from "@mariozechner/pi-coding-agent";
-import { Container, Key, matchesKey, Spacer, Text, truncateToWidth, type Component } from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-coding-agent";
+import { Container, Key, matchesKey, Spacer, Text, truncateToWidth, type Component } from "@earendil-works/pi-tui";
 
 type UsedCategoryKey = "systemPrompt" | "systemTools" | "extensions" | "contextFiles" | "skills" | "messages" | "other";
 type CategoryKey = UsedCategoryKey | "available";

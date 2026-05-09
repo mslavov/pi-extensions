@@ -1,6 +1,6 @@
 # pi-extensions
 
-Monorepo for [pi](https://github.com/mariozechner/pi-coding-agent) extensions.
+Monorepo for [pi](https://github.com/earendil-works/pi-mono) extensions.
 
 Remote: `git@github.com:mslavov/pi-extensions.git`
 
@@ -14,6 +14,7 @@ Remote: `git@github.com:mslavov/pi-extensions.git`
 | [pi-markitdown](packages/pi-markitdown/) | Reads PDFs, Office files, images, and other non-text files as Markdown via MarkItDown |
 | [pi-plan-mode](packages/pi-plan-mode/) | Structured planning via scout/planner subagents with task tracking |
 | [pi-powerline](packages/pi-powerline/) | Configurable Powerline-style footer for pi |
+| [pi-prompt-history](packages/pi-prompt-history/) | Ctrl+R prompt history picker across projects, project, or session |
 | [pi-progressive-context](packages/pi-progressive-context/) | Lazy nested AGENTS.md / CLAUDE.md context loading for pi |
 | [pi-subagents](packages/pi-subagents/) | Patched fork of `@tintinweb/pi-subagents` for autonomous sub-agents in pi |
 | [pi-todo-write](packages/pi-todo-write/) | TodoWrite tool for structured task list management in coding sessions |
@@ -53,6 +54,7 @@ Or add local packages to `~/.pi/agent/settings.json`:
     "../../workspace/pi-extensions/packages/pi-todo-write",
     "../../workspace/pi-extensions/packages/pi-plan-mode",
     "../../workspace/pi-extensions/packages/pi-powerline",
+    "../../workspace/pi-extensions/packages/pi-prompt-history",
     "../../workspace/pi-extensions/packages/pi-markitdown",
     "../../workspace/pi-extensions/packages/pi-autocomplete",
     "../../workspace/pi-extensions/packages/pi-progressive-context"

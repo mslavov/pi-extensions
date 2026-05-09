@@ -49,7 +49,7 @@ If the task looks like implementation, debugging, investigation, build, test, or
 
 The follow-up tells the agent to:
 
-1. Create a task-specific demo file, such as `demo.md` or `demos/<slug>.md`.
+1. Create a task-specific demo file under `.pi/demos/`, such as `.pi/demos/<slug>.md`.
 2. Add a note summarizing the work.
 3. Capture key verification or demonstration commands with `showboat action=exec`.
 4. Add screenshots with `showboat action=image` when UI evidence is relevant.
@@ -91,16 +91,16 @@ Optional `workdir` is passed through as Showboat's `--workdir <dir>` global opti
 A typical agent-created demo looks like this:
 
 ```text
-showboat action=init file=demos/parser-fix.md title="Parser fix demo"
-showboat action=note file=demos/parser-fix.md text="This demo captures the parser test after the fix."
-showboat action=exec file=demos/parser-fix.md lang=bash code="bun test parser.test.ts"
-showboat action=verify file=demos/parser-fix.md
+showboat action=init file=.pi/demos/parser-fix.md title="Parser fix demo"
+showboat action=note file=.pi/demos/parser-fix.md text="This demo captures the parser test after the fix."
+showboat action=exec file=.pi/demos/parser-fix.md lang=bash code="bun test parser.test.ts"
+showboat action=verify file=.pi/demos/parser-fix.md
 ```
 
 If a command produces bad or noisy output, the agent should use:
 
 ```text
-showboat action=pop file=demos/parser-fix.md
+showboat action=pop file=.pi/demos/parser-fix.md
 ```
 
 Do not manually edit captured Showboat output blocks. Use Showboat commands so the demo reflects what actually ran.
@@ -110,7 +110,7 @@ Do not manually edit captured Showboat output blocks. Use Showboat commands so t
 `pi-showboat` does not include browser automation. When UI evidence is needed, the agent should use whatever browser or project tooling is already available, save screenshots, then append them:
 
 ```text
-showboat action=image file=demos/homepage-fix.md path=artifacts/screenshot.png text="Homepage after the fix"
+showboat action=image file=.pi/demos/homepage-fix.md path=artifacts/screenshot.png text="Homepage after the fix"
 ```
 
 Good options can include project Playwright scripts, Playwright CLI, `agent-browser`, `rodney`, or any existing tool that can exercise the UI and produce screenshots.

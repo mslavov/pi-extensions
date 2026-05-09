@@ -19,9 +19,9 @@
 
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { getMarkdownTheme, type ExtensionAPI, type ExtensionContext, type ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
-import { Type } from "@sinclair/typebox";
-import { Key, Markdown, Text } from "@mariozechner/pi-tui";
+import { getMarkdownTheme, type ExtensionAPI, type ExtensionContext, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
+import { Key, Markdown, Text } from "@earendil-works/pi-tui";
 import { extractPlanSteps, type PlanStep } from "./utils.js";
 
 const TODO_TOOL = "todo_write";

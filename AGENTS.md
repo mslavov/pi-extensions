@@ -15,7 +15,7 @@
 ## Pi Extensions
 
 - Extensions export a default function receiving `ExtensionAPI`.
-- Types come from `@mariozechner/pi-coding-agent` and related pi packages.
+- Types come from `@earendil-works/pi-coding-agent` and related pi packages.
 - Pi compiles TypeScript directly; package `build` scripts should not add unnecessary build steps.
 - Test an extension locally with `pi -e ./packages/<name>`.
 

@@ -7,8 +7,8 @@
  * headroom compression all work naturally on the converted content.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { isToolCallEventType, isReadToolResult } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { isToolCallEventType, isReadToolResult } from "@earendil-works/pi-coding-agent";
 import { ensureInstalled, convertFile } from "./installer.js";
 import { mkdirSync, existsSync, writeFileSync, statSync } from "node:fs";
 import { join, resolve, basename } from "node:path";

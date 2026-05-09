@@ -1,6 +1,6 @@
 # pi-headroom
 
-Transparent LLM context compression for [Pi](https://github.com/mariozechner/pi-coding-agent) using [Headroom](https://github.com/chopratejas/headroom). Automatically compresses conversation context before every LLM call, saving 70–95% of tokens without changing your workflow.
+Transparent LLM context compression for [Pi](https://github.com/earendil-works/pi-mono) using [Headroom](https://github.com/chopratejas/headroom). Automatically compresses conversation context before every LLM call, saving 70–95% of tokens without changing your workflow.
 
 **Zero-config:** The extension automatically installs the Headroom proxy (`pip install headroom-ai[proxy]`), starts it on session start, and stops it on exit. You don't need to touch the proxy manually.
 

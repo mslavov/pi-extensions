@@ -3,11 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
-vi.mock("@mariozechner/pi-ai", () => ({
+vi.mock("@earendil-works/pi-ai", () => ({
   complete: vi.fn(),
 }));
 
-import { complete } from "@mariozechner/pi-ai";
+import { complete } from "@earendil-works/pi-ai";
 import { DEFAULT_AGENTS } from "../default-agents.js";
 import { resolveAgentInvocationConfig } from "../invocation-config.js";
 import { loadModelTiersConfig, type ModelTier, type ModelTierCandidate, type ModelTiersConfig } from "../model-tiers.js";

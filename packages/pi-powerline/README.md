@@ -1,6 +1,6 @@
 # pi-powerline
 
-Configurable Powerline-style footer for [pi](https://github.com/mariozechner/pi-coding-agent).
+Configurable Powerline-style footer for [pi](https://github.com/earendil-works/pi-mono).
 
 `pi-powerline` replaces pi's built-in footer with a multi-segment footer showing cwd, git state, model, session usage, subscription limits, context usage, lightweight metrics, and extension statuses.
 

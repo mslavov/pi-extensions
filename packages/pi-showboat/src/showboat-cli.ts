@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
-import { truncateTail, type TruncationResult } from "@mariozechner/pi-coding-agent";
+import { mkdir } from "node:fs/promises";
+import { dirname } from "node:path";
+import { truncateTail, type TruncationResult } from "@earendil-works/pi-coding-agent";
 
 const DETECT_TIMEOUT_MS = 60_000;
 const COMMAND_TIMEOUT_MS = 10 * 60_000;
@@ -61,6 +63,7 @@ export async function resolveShowboat(): Promise<ShowboatStatus> {
 }
 
 export async function init(file: string, title: string, options: ShowboatRunOptions): Promise<ShowboatRunResult> {
+	await mkdir(dirname(file), { recursive: true });
 	return runShowboat("init", [file, title], options);
 }
 

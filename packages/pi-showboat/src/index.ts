@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
-import { StringEnum, Type } from "@mariozechner/pi-ai";
-import { withFileMutationQueue, type AgentToolResult, type ExtensionAPI, type ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { StringEnum, Type } from "@earendil-works/pi-ai";
+import { withFileMutationQueue, type AgentToolResult, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import * as showboat from "./showboat-cli.js";
 
 const ACTIONS = ["status", "init", "note", "exec", "image", "pop", "verify", "extract"] as const;
@@ -136,6 +136,7 @@ export default function showboatExtension(pi: ExtensionAPI): void {
 			return;
 		}
 
+		if (agentTurnFailed(event.messages)) return;
 		if (!shouldRequestShowcase(event.messages)) return;
 
 		const status = await showboat.resolveShowboat();
@@ -208,6 +209,19 @@ export default function showboatExtension(pi: ExtensionAPI): void {
 			pi.sendUserMessage(content, { deliverAs: "followUp" });
 		}
 	}
+}
+
+function agentTurnFailed(messages: unknown[]): boolean {
+	const stopReason = lastAssistantStopReason(messages);
+	return stopReason === "error" || stopReason === "aborted";
+}
+
+function lastAssistantStopReason(messages: unknown[]): string | undefined {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const msg = messages[i] as { role?: unknown; stopReason?: unknown };
+		if (msg.role === "assistant" && typeof msg.stopReason === "string") return msg.stopReason;
+	}
+	return undefined;
 }
 
 function shouldRequestShowcase(messages: unknown[]): boolean {
@@ -464,7 +478,7 @@ function buildShowcaseFollowUpPrompt(): string {
 	return `Create a concise Showboat showcase for the work you just completed.
 
 Use the \`showboat\` tool only; do not edit Showboat Markdown manually.
-- Create a task-specific demo file such as \`demo.md\` or \`demos/<slug>.md\` if one does not already fit this work.
+- Create a task-specific demo file under \`.pi/demos/\`, such as \`.pi/demos/<slug>.md\`, if one does not already fit this work.
 - Add a short note summarizing what changed.
 - Capture the key verification or demonstration commands with \`showboat\` action \`exec\`.
 - If UI or visual behavior changed, use available project/browser tooling to produce screenshots, then append them with \`showboat\` action \`image\`.

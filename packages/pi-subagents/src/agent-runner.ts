@@ -4,8 +4,8 @@
 
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { Model } from "@mariozechner/pi-ai";
-import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { Model } from "@earendil-works/pi-ai";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   type AgentSession,
   type AgentSessionEvent,
@@ -14,7 +14,7 @@ import {
   type ExtensionAPI,
   SessionManager,
   SettingsManager,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import { getAgentConfig, getConfig, getMemoryTools, getReadOnlyMemoryTools, getToolsForType } from "./agent-types.js";
 import { buildParentContext, extractText } from "./context.js";
 import { detectEnv } from "./env.js";

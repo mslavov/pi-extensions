@@ -1,5 +1,5 @@
-import { complete } from "@mariozechner/pi-ai";
-import type { AssistantMessage, Model } from "@mariozechner/pi-ai";
+import { complete } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Model } from "@earendil-works/pi-ai";
 import { loadModelTiersConfig, MODEL_TIERS, type ModelTier, type ModelTiersConfig } from "./model-tiers.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
 import type { ThinkingLevel } from "./types.js";

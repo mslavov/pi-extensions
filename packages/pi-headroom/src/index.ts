@@ -7,8 +7,8 @@
  * Set HEADROOM_URL to skip auto-management and use your own proxy.
  */
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { convertToLlm } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { convertToLlm } from "@earendil-works/pi-coding-agent";
 import { HeadroomClient, compress } from "headroom-ai";
 import type { CompressResult } from "headroom-ai";
 import { piToOpenAI, openAIToPi } from "./format-bridge.js";
