@@ -1,0 +1,14 @@
+id: pi-markitdown-command
+suite: pi-extensions
+description: Verify the /markitdown command from pi-markitdown is registered in the current Pi setup.
+agents:
+  include: [pi-current]
+prompt: /markitdown
+assert:
+  - type: settingsDrivenSetup
+  - type: exitCode
+    equals: 0
+  - type: notContains
+    value: '"type":"agent_start"'
+  - type: workspaceDiff
+    changedFiles: []

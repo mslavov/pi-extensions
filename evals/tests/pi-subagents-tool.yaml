@@ -1,0 +1,27 @@
+id: pi-subagents-tool
+suite: pi-extensions
+description: Verify the Agent tool from pi-subagents can launch an Explore subagent in the current Pi setup.
+agents:
+  include: [pi-current]
+timeoutMs: 600000
+args:
+  - --tools
+  - Agent
+prompt: |
+  This is an eval. Use the Agent tool exactly once with:
+  - subagent_type: Explore
+  - description: subagents eval
+  - max_turns: 2
+  - prompt: Read package.json and reply with SUBAGENT_CHILD_OK if the package name is pi-extensions.
+
+  After the subagent returns, reply exactly SUBAGENTS_OK.
+assert:
+  - type: settingsDrivenSetup
+  - type: toolCalled
+    name: Agent
+    min: 1
+  - type: contains
+    value: SUBAGENTS_OK
+  - type: noToolErrors
+  - type: workspaceDiff
+    changedFiles: []

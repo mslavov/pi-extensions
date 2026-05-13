@@ -1,0 +1,14 @@
+id: pi-context-command
+suite: pi-extensions
+description: Verify the /context command from pi-context is registered in the current Pi setup.
+agents:
+  include: [pi-current]
+prompt: /context
+assert:
+  - type: settingsDrivenSetup
+  - type: exitCode
+    equals: 0
+  - type: notContains
+    value: '"type":"agent_start"'
+  - type: workspaceDiff
+    changedFiles: []

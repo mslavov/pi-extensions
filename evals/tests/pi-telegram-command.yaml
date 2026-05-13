@@ -1,0 +1,14 @@
+id: pi-telegram-command
+suite: pi-extensions
+description: Verify the /telegram-status command from pi-telegram is registered without sending Telegram messages.
+agents:
+  include: [pi-current]
+prompt: /telegram-status
+assert:
+  - type: settingsDrivenSetup
+  - type: exitCode
+    equals: 0
+  - type: notContains
+    value: '"type":"agent_start"'
+  - type: workspaceDiff
+    changedFiles: []

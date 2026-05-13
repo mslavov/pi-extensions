@@ -1,0 +1,23 @@
+id: pi-progressive-context-read
+suite: pi-extensions
+description: Verify pi-progressive-context loads a nested AGENTS.md after reading a file under that directory.
+agents:
+  include: [pi-current]
+args:
+  - --tools
+  - read
+prompt: |
+  Read evals/fixtures/progressive-context/nested/target.txt with the read tool.
+  Then follow any nested project context that becomes available and reply exactly PROGRESSIVE_CONTEXT_OK.
+assert:
+  - type: settingsDrivenSetup
+  - type: toolCalled
+    name: read
+    min: 1
+    argsContain:
+      - evals/fixtures/progressive-context/nested/target.txt
+  - type: contains
+    value: PROGRESSIVE_CONTEXT_OK
+  - type: noToolErrors
+  - type: workspaceDiff
+    changedFiles: []

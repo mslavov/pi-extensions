@@ -1,0 +1,13 @@
+id: pi-current-setup
+suite: pi-extensions
+description: Verify the Pi agent starts with the current global Pi settings and local extension packages.
+agents:
+  include: [pi-current]
+prompt: Reply exactly PI_CURRENT_SETUP_OK.
+assert:
+  - type: settingsDrivenSetup
+  - type: contains
+    value: PI_CURRENT_SETUP_OK
+  - type: noToolErrors
+  - type: workspaceDiff
+    changedFiles: []

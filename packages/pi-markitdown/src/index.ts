@@ -86,6 +86,20 @@ export default function (pi: ExtensionAPI) {
 	// Track which tool calls had their path rewritten so we can add a footer
 	const rewrittenCalls = new Map<string, string>(); // toolCallId -> originalPath
 
+	function isStaleContextError(error: unknown): boolean {
+		const message = error instanceof Error ? error.message : String(error);
+		return message.includes("extension ctx is stale") || message.includes("captured pi or command ctx");
+	}
+
+	function setMarkitdownStatus(ctx: ExtensionContext, status: string): void {
+		try {
+			ctx.ui.setStatus("markitdown", status);
+		} catch (error) {
+			if (isStaleContextError(error)) return;
+			throw error;
+		}
+	}
+
 	async function getInvocation(ctx: ExtensionContext): Promise<{ cmd: string; args: string[] } | null> {
 		if (invocation) return invocation;
 		if (installFailed) return null;
@@ -93,19 +107,16 @@ export default function (pi: ExtensionAPI) {
 
 		installing = true;
 		try {
-			ctx.ui.setStatus("markitdown", ctx.ui.theme.fg("dim", "⏳ Setting up markitdown..."));
+			setMarkitdownStatus(ctx, "⏳ Setting up markitdown...");
 			invocation = await ensureInstalled((msg) => {
-				ctx.ui.setStatus("markitdown", ctx.ui.theme.fg("dim", `⏳ ${msg}`));
+				setMarkitdownStatus(ctx, `⏳ ${msg}`);
 			});
 
 			if (invocation) {
-				ctx.ui.setStatus("markitdown", ctx.ui.theme.fg("success", "✓") + ctx.ui.theme.fg("dim", " MarkItDown"));
+				setMarkitdownStatus(ctx, "✓ MarkItDown");
 			} else {
 				installFailed = true;
-				ctx.ui.setStatus(
-					"markitdown",
-					ctx.ui.theme.fg("warning", "⚠") + ctx.ui.theme.fg("dim", " MarkItDown unavailable"),
-				);
+				setMarkitdownStatus(ctx, "⚠ MarkItDown unavailable");
 			}
 		} finally {
 			installing = false;
@@ -116,7 +127,9 @@ export default function (pi: ExtensionAPI) {
 	// ── Session start: check availability ───────────────────────────
 
 	pi.on("session_start", async (_event, ctx) => {
-		getInvocation(ctx);
+		void getInvocation(ctx).catch((error) => {
+			if (!isStaleContextError(error)) installFailed = true;
+		});
 	});
 
 	// ── System prompt injection ─────────────────────────────────────

@@ -1,0 +1,12 @@
+version: 1
+
+agents:
+  pi-current:
+    adapter: pi
+    useCurrentConfig: true
+    timeoutMs: 600000
+    config:
+      globalSettingsTemplate: evals/pi/global-settings.json
+
+tests:
+  - evals/tests/**/*.yaml

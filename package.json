@@ -8,9 +8,12 @@
   "scripts": {
     "check": "turbo check",
     "build": "turbo build",
-    "clean": "turbo clean"
+    "clean": "turbo clean",
+    "evals:list": "harness-evals list",
+    "evals:pi": "harness-evals run --suite pi-extensions --agents pi-current --concurrency 1"
   },
   "devDependencies": {
+    "harness-evals": "^0.1.0",
     "turbo": "^2.9.6",
     "typescript": "^6.0.2",
     "vitest": "^4.1.5"

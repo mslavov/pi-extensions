@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .turbo/
+.harness-evals/
 *.tsbuildinfo
 .DS_Store
 .pi/plans/

@@ -1,0 +1,14 @@
+id: pi-progressive-context-command
+suite: pi-extensions
+description: Verify the /progressive-context command is registered in the current Pi setup.
+agents:
+  include: [pi-current]
+prompt: /progressive-context
+assert:
+  - type: settingsDrivenSetup
+  - type: exitCode
+    equals: 0
+  - type: notContains
+    value: '"type":"agent_start"'
+  - type: workspaceDiff
+    changedFiles: []

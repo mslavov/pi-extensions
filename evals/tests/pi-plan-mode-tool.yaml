@@ -1,0 +1,22 @@
+id: pi-plan-mode-tool
+suite: pi-extensions
+description: Verify the enter_plan_mode tool from pi-plan-mode works in the current Pi setup.
+agents:
+  include: [pi-current]
+args:
+  - --tools
+  - enter_plan_mode
+prompt: |
+  This is an eval. Call the enter_plan_mode tool exactly once.
+  Do not write files and do not call exit_plan_mode.
+  After the tool result, reply exactly PLAN_MODE_OK.
+assert:
+  - type: settingsDrivenSetup
+  - type: toolCalled
+    name: enter_plan_mode
+    min: 1
+  - type: contains
+    value: PLAN_MODE_OK
+  - type: noToolErrors
+  - type: workspaceDiff
+    changedFiles: []

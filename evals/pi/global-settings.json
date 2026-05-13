@@ -1,0 +1,18 @@
+{
+  "npmCommand": ["npm", "--prefix", "/agent-config/npm-global", "--cache", "/agent-config/npm-cache"],
+  "packages": [
+    "npm:pi-web-access",
+    "npm:pi-rewind-hook",
+    "npm:pi-ask-user",
+    "npm:pi-rtk-optimizer",
+    "${repoPackage:pi-subagents}",
+    "${repoPackage:pi-todo-write}",
+    "${repoPackage:pi-plan-mode}",
+    "${repoPackage:pi-markitdown}",
+    "${repoPackage:pi-powerline}",
+    "${repoPackage:pi-context}",
+    "${repoPackage:pi-telegram}",
+    "${repoPackage:pi-progressive-context}",
+    "${repoPackage:pi-prompt-history}"
+  ]
+}

@@ -1,0 +1,24 @@
+id: pi-markitdown-read
+suite: pi-extensions
+description: Verify pi-markitdown converts a supported non-text file when the read tool is used.
+agents:
+  include: [pi-current]
+timeoutMs: 600000
+args:
+  - --tools
+  - read
+prompt: |
+  Read evals/fixtures/markitdown/sample.rtf with the read tool.
+  If the converted content contains MARKITDOWN_HAPPY_PATH_TEXT, reply exactly MARKITDOWN_OK.
+assert:
+  - type: settingsDrivenSetup
+  - type: toolCalled
+    name: read
+    min: 1
+    argsContain:
+      - evals/fixtures/markitdown/sample.rtf
+  - type: contains
+    value: MARKITDOWN_OK
+  - type: noToolErrors
+  - type: workspaceDiff
+    changedFiles: []

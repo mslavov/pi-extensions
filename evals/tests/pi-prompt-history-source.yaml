@@ -1,0 +1,23 @@
+id: pi-prompt-history-source
+suite: pi-extensions
+description: Verify the current Pi setup can inspect pi-prompt-history's Ctrl+R shortcut registration in non-interactive mode.
+agents:
+  include: [pi-current]
+args:
+  - --tools
+  - read
+prompt: |
+  Read packages/pi-prompt-history/src/index.ts.
+  Confirm it registers the Ctrl+R prompt history shortcut by replying exactly PROMPT_HISTORY_OK.
+assert:
+  - type: settingsDrivenSetup
+  - type: toolCalled
+    name: read
+    min: 1
+    argsContain:
+      - packages/pi-prompt-history/src/index.ts
+  - type: contains
+    value: PROMPT_HISTORY_OK
+  - type: noToolErrors
+  - type: workspaceDiff
+    changedFiles: []
