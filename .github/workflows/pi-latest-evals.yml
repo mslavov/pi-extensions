@@ -1,0 +1,247 @@
+name: Latest Pi evals
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 5 * * *"
+
+concurrency:
+  group: pi-latest-evals
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  PI_PROVIDER: ${{ vars.PI_PROVIDER || 'openai-codex' }}
+  PI_MODEL: ${{ vars.PI_MODEL || 'gpt-5.5' }}
+
+jobs:
+  evals:
+    name: Run latest-Pi evals
+    runs-on: ubuntu-latest
+    outputs:
+      failed: ${{ steps.evals_status.outputs.failed }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Configure Pi Codex auth
+        env:
+          PI_CODEX_AUTH_JSON_B64: ${{ secrets.PI_CODEX_AUTH_JSON_B64 }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${PI_CODEX_AUTH_JSON_B64:-}" ]]; then
+            echo "PI_CODEX_AUTH_JSON_B64 secret is required" >&2
+            exit 1
+          fi
+
+          mkdir -p "$HOME/.pi/agent"
+          auth_file="$HOME/.pi/agent/auth.json"
+          printf '%s' "$PI_CODEX_AUTH_JSON_B64" | base64 --decode > "$auth_file"
+          chmod 600 "$auth_file"
+
+          jq -e '
+            type == "object" and
+            (keys == ["openai-codex"]) and
+            ."openai-codex".type == "oauth" and
+            (."openai-codex".access | type == "string" and length > 0) and
+            (."openai-codex".refresh | type == "string" and length > 0)
+          ' "$auth_file" >/dev/null
+
+          access_token="$(jq -r '."openai-codex".access' "$auth_file")"
+          refresh_token="$(jq -r '."openai-codex".refresh' "$auth_file")"
+          echo "::add-mask::$access_token"
+          echo "::add-mask::$refresh_token"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run type checks
+        id: typecheck
+        continue-on-error: true
+        run: bun run check
+
+      - name: Run latest-Pi harness evals
+        id: latest_pi_evals
+        continue-on-error: true
+        run: bun run evals:pi -- --provider "$PI_PROVIDER" --model "$PI_MODEL"
+
+      - name: Record eval status
+        id: evals_status
+        run: |
+          if [[ "${{ steps.typecheck.outcome }}" == "success" && "${{ steps.latest_pi_evals.outcome }}" == "success" ]]; then
+            echo "failed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "failed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Scrub credentials from eval artifacts
+        if: always()
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          root = Path(".harness-evals")
+          auth_file = Path.home() / ".pi" / "agent" / "auth.json"
+          if not root.exists() or not auth_file.exists():
+              raise SystemExit(0)
+
+          auth = json.loads(auth_file.read_text())
+          codex_auth = auth.get("openai-codex") or {}
+          tokens = [
+              token
+              for token in (codex_auth.get("access"), codex_auth.get("refresh"))
+              if isinstance(token, str) and token
+          ]
+          if not tokens:
+              raise SystemExit(0)
+
+          suffixes = {".json", ".log", ".md", ".txt"}
+          for artifact in root.rglob("*"):
+              if not artifact.is_file() or artifact.suffix not in suffixes:
+                  continue
+              data = artifact.read_bytes()
+              scrubbed = data
+              for token in tokens:
+                  scrubbed = scrubbed.replace(token.encode(), b"[REDACTED_CODEX_TOKEN]")
+              if scrubbed != data:
+                  artifact.write_bytes(scrubbed)
+          PY
+
+      - name: Upload eval artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: harness-evals-artifacts
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            .harness-evals/output/latest/**
+            .harness-evals/runs/**/summary.json
+            .harness-evals/runs/**/result.json
+            .harness-evals/runs/**/steps/**/stdout.log
+            .harness-evals/runs/**/steps/**/stderr.log
+            .harness-evals/runs/**/steps/**/events-summary.json
+            .harness-evals/runs/**/steps/**/command.redacted.json
+            !.harness-evals/runs/**/config/**
+            !.harness-evals/runs/**/workspace/**
+
+  repair:
+    name: Repair latest-Pi eval failures
+    needs: evals
+    if: needs.evals.outputs.failed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out default branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Configure Pi Codex auth
+        env:
+          PI_CODEX_AUTH_JSON_B64: ${{ secrets.PI_CODEX_AUTH_JSON_B64 }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${PI_CODEX_AUTH_JSON_B64:-}" ]]; then
+            echo "PI_CODEX_AUTH_JSON_B64 secret is required" >&2
+            exit 1
+          fi
+
+          mkdir -p "$HOME/.pi/agent"
+          auth_file="$HOME/.pi/agent/auth.json"
+          printf '%s' "$PI_CODEX_AUTH_JSON_B64" | base64 --decode > "$auth_file"
+          chmod 600 "$auth_file"
+
+          jq -e '
+            type == "object" and
+            (keys == ["openai-codex"]) and
+            ."openai-codex".type == "oauth" and
+            (."openai-codex".access | type == "string" and length > 0) and
+            (."openai-codex".refresh | type == "string" and length > 0)
+          ' "$auth_file" >/dev/null
+
+          access_token="$(jq -r '."openai-codex".access' "$auth_file")"
+          refresh_token="$(jq -r '."openai-codex".refresh' "$auth_file")"
+          echo "::add-mask::$access_token"
+          echo "::add-mask::$refresh_token"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Download eval artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: harness-evals-artifacts
+          path: .harness-evals
+
+      - name: Run latest Pi repair agent
+        run: |
+          bun run agent:fix-evals -- \
+            --provider "$PI_PROVIDER" \
+            --model "$PI_MODEL" \
+            @.github/prompts/fix-harness-evals.md \
+            "Use the latest eval artifacts to repair the current latest-Pi compatibility failure."
+
+      - name: Run post-repair verification
+        id: verify
+        run: |
+          set +e
+          bun run check
+          check_status=$?
+          bun run evals:pi -- --provider "$PI_PROVIDER" --model "$PI_MODEL"
+          eval_status=$?
+
+          echo "check_status=$check_status" >> "$GITHUB_OUTPUT"
+          echo "eval_status=$eval_status" >> "$GITHUB_OUTPUT"
+
+          if [[ "$check_status" -eq 0 && "$eval_status" -eq 0 ]]; then
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create or update repair PR
+        id: cpr
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "fix: adapt extensions for latest pi"
+          committer: Milko Slavov <milko.slavov@gmail.com>
+          author: Milko Slavov <milko.slavov@gmail.com>
+          branch: automation/pi-latest-evals-fix
+          base: ${{ github.event.repository.default_branch }}
+          delete-branch: false
+          title: "fix: adapt extensions for latest pi"
+          body: |
+            Automated repair for latest-Pi harness eval failures.
+
+            Post-repair verification passed: `${{ steps.verify.outputs.passed }}`
+            Check status: `${{ steps.verify.outputs.check_status }}`
+            Evals status: `${{ steps.verify.outputs.eval_status }}`
+            Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          draft: ${{ steps.verify.outputs.passed == 'true' && 'false' || 'always-true' }}
+          add-paths: |
+            packages/**
+            evals/**
+            .github/prompts/**
+            package.json
+            bun.lock
+            tsconfig.json
+            turbo.json
+
+      - name: Fail when verification is still failing
+        if: steps.verify.outputs.passed != 'true'
+        run: exit 1
