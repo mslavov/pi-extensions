@@ -1,0 +1,23 @@
+{
+  "name": "pi-claude-code",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Load Claude Code slash commands as pi skills and Claude Code subagents as pi subagents",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "author": "Milko Slavov <milko.slavov@gmail.com>",
+  "pi": {
+    "extensions": ["./src/index.ts"]
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "build": "echo 'pi compiles TS directly'",
+    "clean": "echo 'nothing to clean'"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.2"
+  }
+}

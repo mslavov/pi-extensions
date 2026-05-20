@@ -252,9 +252,14 @@ export default function (pi: ExtensionAPI) {
     }
   );
 
-  /** Reload agents from .pi/agents/*.md and merge with defaults (called on init and each Agent invocation). */
+  /** Reload agents from configured sources and merge with defaults (called on init and each Agent invocation). */
   const reloadCustomAgents = () => {
-    const userAgents = loadCustomAgents(process.cwd());
+    const cwd = process.cwd();
+    const userAgents = loadCustomAgents(cwd);
+
+    // Extension integration: handlers may synchronously add or override AgentConfig entries.
+    pi.events.emit("subagents:discover_agents", { cwd, agents: userAgents });
+
     registerAgents(userAgents);
   };
 
