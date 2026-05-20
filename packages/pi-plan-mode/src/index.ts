@@ -3,7 +3,7 @@
  *
  * Iterative planning workflow inspired by Claude Code's plan mode:
  *   1. Explore codebase (directly + Explore agents for parallel search)
- *   2. Update plan file incrementally as understanding grows
+ *   2. Update the standalone HTML plan file incrementally as understanding grows
  *   3. Ask user clarifying questions via ask_user/questionnaire
  *   4. Repeat until plan is complete
  *   5. Call exit_plan_mode for user approval
@@ -17,12 +17,13 @@
  *   exit_plan_mode       Model exits plan mode, presents plan for approval
  */
 
+import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { getMarkdownTheme, type ExtensionAPI, type ExtensionContext, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { Key, Markdown, Text } from "@earendil-works/pi-tui";
-import { extractPlanSteps, type PlanStep } from "./utils.js";
 
 const TODO_TOOL = "todo_write";
 const AGENT_TOOL = "Agent";
@@ -33,7 +34,6 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 	let planModeEnabled = false;
 	let planFilePath = "";
 	let planDescription = "";
-	let planSteps: PlanStep[] = [];
 	let hasTodoExtension = false;
 	let hasAgentTool = false;
 	let fullInstructionsSent = false;
@@ -52,7 +52,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 	function generatePlanPath(): string {
 		const now = new Date();
 		const slug = now.toISOString().replace(/[:.]/g, "-").replace("T", "_").slice(0, 19);
-		return join(getPlansDir(), `plan-${slug}.md`);
+		return join(getPlansDir(), `plan-${slug}.html`);
 	}
 
 	function readPlanFile(path: string): string | null {
@@ -60,6 +60,33 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 			return readFileSync(path, "utf-8");
 		} catch {
 			return null;
+		}
+	}
+
+	function openPlanInBrowser(path: string, ctx: ExtensionContext): void {
+		const url = pathToFileURL(path).href;
+		let command: string;
+		let args: string[];
+
+		if (process.platform === "darwin") {
+			command = "open";
+			args = [url];
+		} else if (process.platform === "win32") {
+			command = "cmd";
+			args = ["/c", "start", "", url];
+		} else {
+			command = "xdg-open";
+			args = [url];
+		}
+
+		try {
+			const child = spawn(command, args, { detached: true, stdio: "ignore" });
+			child.on("error", () => {
+				ctx.ui.notify(`Could not open HTML plan in a browser. Open manually: ${path}`, "warning");
+			});
+			child.unref();
+		} catch {
+			ctx.ui.notify(`Could not open HTML plan in a browser. Open manually: ${path}`, "warning");
 		}
 	}
 
@@ -111,7 +138,6 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 
 	function enablePlanMode(ctx: ExtensionContext): void {
 		planModeEnabled = true;
-		planSteps = [];
 		fullInstructionsSent = false;
 		planFilePath = generatePlanPath();
 
@@ -128,7 +154,6 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 
 	function disablePlanMode(ctx: ExtensionContext): void {
 		planModeEnabled = false;
-		planSteps = [];
 		planDescription = "";
 		fullInstructionsSent = false;
 		const tools = pi.getAllTools().map((t) => t.name);
@@ -149,7 +174,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 	pi.registerMessageRenderer("plan-result", (message) => renderMarkdown(textContent(message.content)));
 
 	/**
-	 * After planning completes, read the plan file, extract steps, and show the menu.
+	 * After planning completes, read the HTML plan file and show the menu.
 	 */
 	async function presentPlan(
 		ctx: ExtensionContext,
@@ -158,9 +183,9 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		const content = readPlanFile(planFilePath);
 
 		if (!content) {
-			ctx.ui.notify(`No plan file found at ${planFilePath}. The planner may not have written to the expected path.`, "error");
+			ctx.ui.notify(`No HTML plan file found at ${planFilePath}. The planner may not have written to the expected path.`, "error");
 
-			const recovery = await ctx.ui.select("Plan file missing — what next?", [
+			const recovery = await ctx.ui.select("HTML plan file missing — what next?", [
 				"Retry planning",
 				"Exit plan mode",
 			]);
@@ -175,9 +200,9 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 			return;
 		}
 
-		planSteps = extractPlanSteps(content);
+		openPlanInBrowser(planFilePath, ctx);
 
-		const preview = `📋 **Plan saved to:** \`${planFilePath}\`\n\nYou can review and edit the plan file before executing.\n\n---\n\n${content}`;
+		const preview = `📋 **HTML plan ready**\n\n- Plan saved to: \`${planFilePath}\`\n- Opened in your browser.\n- If it did not open, open this file manually: \`${planFilePath}\``;
 		options.onPreview?.(preview);
 
 		if (options.sendPreviewMessage !== false) {
@@ -226,23 +251,17 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 	 * Execute plan with the main agent.
 	 */
 	async function executeWithMainAgent(ctx: ExtensionContext): Promise<void> {
-		const content = readPlanFile(planFilePath) ?? "";
-		planSteps = extractPlanSteps(content);
-
 		planModeEnabled = false;
 		const tools = pi.getAllTools().map((t) => t.name);
 		pi.setActiveTools(tools);
 		updateStatus(ctx);
 		persistState();
 
-		const todoInstructions = buildTodoInstructions(content);
-		const executeContent = `Execute the following implementation plan. The plan file is at \`${planFilePath}\`.
+		const executeContent = `Execute the implementation plan saved as standalone HTML at \`${planFilePath}\`.
 
-${todoInstructions}
+${buildTodoInstructions()}
 
-Read the plan file, then execute each step in order. Use todo_write to update progress — mark each task as \`in_progress\` when starting and \`completed\` when done.
-
-Focus only on the plan — ignore previous exploration context.`;
+Focus only on the HTML plan — ignore previous exploration context.`;
 
 		// Try to start a fresh session so exploration context is gone
 		const cmdCtx = lastCommandCtx ?? (ctx as any);
@@ -278,25 +297,23 @@ Focus only on the plan — ignore previous exploration context.`;
 	 * Execute plan with a general-purpose subagent.
 	 */
 	async function executeWithSubagent(ctx: ExtensionContext): Promise<void> {
-		const content = readPlanFile(planFilePath) ?? "";
-		planSteps = extractPlanSteps(content);
-
 		planModeEnabled = false;
 		const tools = pi.getAllTools().map((t) => t.name);
 		pi.setActiveTools(tools);
 		updateStatus(ctx);
 		persistState();
 
-		const todoInstructions = buildTodoInstructions(content);
+		const todoInstructions = buildTodoInstructions();
+		const delegationLead = hasTodoExtension ? "After creating the todos" : "After reading the HTML plan";
 
 		pi.sendMessage(
 			{
 				customType: "plan-execute",
 				content: `${todoInstructions}
 
-After creating the todos, delegate execution to a subagent:
+${delegationLead}, delegate execution to a subagent:
 
-Agent({ subagent_type: "general-purpose", prompt: "Execute the implementation plan at ${planFilePath}. Read the plan file and implement each step. Use todo_write to update the todo list — mark each task as in_progress when starting and completed when done.\\n\\nOriginal request: ${escapeForTemplate(planDescription)}", description: "Execute implementation plan" })
+Agent({ subagent_type: "general-purpose", prompt: "Execute the implementation plan at ${escapeForTemplate(planFilePath)}. Read the standalone HTML plan file before making changes. Derive the implementation tasks from the visible headings, lists, and diagrams, then implement them in order. Use todo_write if available to update progress as you work.\\n\\nOriginal request: ${escapeForTemplate(planDescription)}", description: "Execute implementation plan" })
 
 Monitor the subagent progress with get_subagent_result.`,
 				display: true,
@@ -305,19 +322,16 @@ Monitor the subagent progress with get_subagent_result.`,
 		);
 	}
 
-	function buildTodoInstructions(planContent: string): string {
-		if (!hasTodoExtension || planSteps.length === 0) {
-			return `**Plan file:** \`${planFilePath}\``;
+	function buildTodoInstructions(): string {
+		if (!hasTodoExtension) {
+			return `Before making changes, read the HTML plan file at \`${planFilePath}\` and derive the implementation tasks from the visible headings, lists, and diagrams.`;
 		}
 
-		const todoItems = planSteps
-			.map((s) => {
-				const content = escapeForTemplate(s.text);
-				return `  { content: "${content}", status: "pending", activeForm: "${content}" }`;
-			})
-			.join(",\n");
-
-		return `First, create a todo list to track progress:\n\ntodo_write({ todos: [\n${todoItems}\n] })`;
+		return `Before making changes:
+1. Read the HTML plan file at \`${planFilePath}\`.
+2. Extract a concise implementation task list from the visible headings, lists, and diagrams.
+3. Call todo_write with those tasks.
+4. Execute the tasks in order, updating todos as you work — mark each task as \`in_progress\` when starting and \`completed\` when done.`;
 	}
 
 	function escapeForTemplate(s: string): string {
@@ -326,19 +340,25 @@ Monitor the subagent progress with get_subagent_result.`,
 
 	function planWorkflowReminder(): string {
 		return hasAgentTool
-			? "Follow the agent-first 5-phase workflow: Explore agents, Plan agents, review, write the final plan, then call exit_plan_mode."
-			: "Follow iterative workflow: explore codebase, interview user, write to plan incrementally.";
+			? "Follow the agent-first 5-phase workflow: Explore agents, Plan agents, review, write the final HTML plan, then call exit_plan_mode."
+			: "Follow iterative workflow: explore codebase, interview user, and write the standalone HTML plan incrementally.";
 	}
 
 	function buildPlanFileStructureInstructions(): string {
-		return `### Phase 4: Final Plan
-Goal: Write your final plan to the plan file (the only file you can edit).
-- Begin with a **Context** section: explain why this change is being made, what prompted it, and the intended outcome
-- Include only your recommended approach, not all alternatives
-- Keep the plan concise enough to scan quickly, but detailed enough to execute effectively
-- Include the paths of critical files to be modified
-- Reference existing functions and utilities you found that should be reused, with file paths
-- Include a verification section describing how to test the changes end-to-end`;
+		return `### Phase 4: Final HTML Plan
+Goal: Write the final plan directly to the HTML plan file (the only file you can edit) as a standalone HTML document.
+
+HTML artifact contract:
+- Write a complete <!doctype html> document with html, head, and body elements.
+- Use inline CSS and inline SVG only. Do not link external assets, scripts, stylesheets, images, fonts, or CDNs.
+- Keep the HTML source readable. Do not include hidden JSON, hidden script blocks, or any machine-readable todo contract.
+- Include visible sections with clear headings: Context, Recommended approach, Implementation steps, Files to modify, Existing code to reuse, Verification.
+- Include only your recommended approach, not all alternatives.
+- Keep the plan concise enough to scan quickly, but detailed enough to execute effectively.
+- Include the paths of critical files to be modified.
+- Reference existing functions and utilities you found that should be reused, with file paths.
+- Include at least one useful, restrained diagram using inline SVG. Usually choose an architecture, flowchart, or sequence diagram based on the plan.
+- When the diagram-design skill is available, load and follow it before drawing diagrams. Keep diagrams readable with clear labels and minimal visual noise.`;
 	}
 
 	function buildAgentFirstWorkflowInstructions(): string {
@@ -384,7 +404,7 @@ Goal: Validate the ${PLAN_AGENT} output against the user's intent and the explor
 ${buildPlanFileStructureInstructions()}
 
 ### Phase 5: Call exit_plan_mode
-At the very end of your turn, once you have asked necessary questions and are happy with the final plan file, call exit_plan_mode to request user approval.
+At the very end of your turn, once you have asked necessary questions and are happy with the final HTML plan file, call exit_plan_mode to request user approval.
 
 Your turn should only end by either:
 - Using ask_user to gather more information from the user
@@ -400,19 +420,19 @@ Your turn should only end by either:
 
 		return `## Iterative Planning Workflow
 
-You are pair-planning with the user. Explore the code to build context, ask the user questions when you hit decisions you can't make alone, and write your findings into the plan file as you go.
+You are pair-planning with the user. Explore the code to build context, ask the user questions when you hit decisions you can't make alone, and write your findings into the standalone HTML plan file as you go.
 
 ### The Loop
 
 Repeat this cycle until the plan is complete:
 
 1. **Explore** — Use read, bash, grep, find, ls to read code. Look for existing functions, utilities, and patterns to reuse.${exploreAgentHint}
-2. **Update the plan file** — After each discovery, immediately capture what you learned. Don't wait until the end.
+2. **Update the HTML plan file** — After each discovery, immediately capture what you learned in a complete standalone HTML document. Don't wait until the end.
 3. **Ask the user** — When you hit an ambiguity or decision you can't resolve from code alone, use ask_user. Then go back to step 1.
 
 ### First Turn
 
-Start by quickly scanning a few key files to form an initial understanding of the task scope. Then write a skeleton plan (headers and rough notes) and ask the user your first round of questions. Don't explore exhaustively before engaging the user.
+Start by quickly scanning a few key files to form an initial understanding of the task scope. Then write a skeleton standalone HTML plan with the required visible sections and ask the user your first round of questions. Don't explore exhaustively before engaging the user.
 
 ### Asking Good Questions
 
@@ -421,20 +441,21 @@ Start by quickly scanning a few key files to form an initial understanding of th
 - Focus on things only the user can answer: requirements, preferences, tradeoffs, edge case priorities
 - Scale depth to the task — a vague feature request needs many rounds; a focused bug fix may need one or none
 
-### Plan File Structure
+### HTML Plan File Structure
 
-Divide the plan into clear sections using markdown headers. Fill them out as you go:
-- **Context** — why this change is needed, what prompted it, intended outcome
-- **Approach** — only the recommended approach, not all alternatives
-- **Files to modify** — paths of critical files
-- **Existing code to reuse** — functions/utilities with file paths
-- **Verification** — how to test the changes end-to-end
+Maintain a complete standalone HTML document as the plan source of truth. Fill it out as you go:
+- Start with <!doctype html> and include html, head, and body elements.
+- Use inline CSS and inline SVG only. Do not link external assets, scripts, stylesheets, images, fonts, or CDNs.
+- Keep the HTML source readable. Do not include hidden JSON, hidden script blocks, or any machine-readable todo contract.
+- Include visible sections with clear headings: Context, Recommended approach, Implementation steps, Files to modify, Existing code to reuse, Verification.
+- Include at least one useful, restrained diagram using inline SVG. Usually choose an architecture, flowchart, or sequence diagram based on the plan.
+- When the diagram-design skill is available, load and follow it before drawing diagrams.
 
 Keep it concise enough to scan quickly, but detailed enough to execute effectively.
 
 ### When to Converge
 
-Your plan is ready when you've addressed all ambiguities and it covers: what to change, which files to modify, what existing code to reuse (with file paths), and how to verify the changes.
+Your plan is ready when the HTML document addresses all ambiguities and covers: what to change, which files to modify, what existing code to reuse (with file paths), and how to verify the changes.
 
 ### Ending Your Turn
 
@@ -465,7 +486,7 @@ Do NOT use for:
 - Tasks where the user gave very specific, detailed instructions
 - Pure research/exploration tasks (use the Agent tool with Explore type instead)
 
-Plan mode keeps all registered tools available while restricting direct write/edit tool calls to the plan file. When the Agent tool is available, use Explore and Plan subagents for agent-first planning; otherwise, explore directly and build the plan incrementally.`,
+Plan mode keeps all registered tools available while restricting direct write/edit tool calls to the HTML plan file. When the Agent tool is available, use Explore and Plan subagents for agent-first planning; otherwise, explore directly and build the plan incrementally.`,
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
 			if (planModeEnabled) {
@@ -473,7 +494,7 @@ Plan mode keeps all registered tools available while restricting direct write/ed
 			}
 			detectAvailableTools();
 			enablePlanMode(ctx);
-			return { content: [{ type: "text" as const, text: `Plan mode enabled. Plan file: ${planFilePath}\n\nYou are now in planning mode. Direct write/edit tool calls are limited to the plan file. ${planWorkflowReminder()} Call the exit_plan_mode tool when the plan is ready for approval.` }], details: undefined };
+			return { content: [{ type: "text" as const, text: `Plan mode enabled. HTML plan file: ${planFilePath}\n\nYou are now in planning mode. Direct write/edit tool calls are limited to the HTML plan file. ${planWorkflowReminder()} Call the exit_plan_mode tool when the plan is ready for approval.` }], details: undefined };
 		},
 	});
 
@@ -481,7 +502,7 @@ Plan mode keeps all registered tools available while restricting direct write/ed
 		name: "exit_plan_mode",
 		label: "Exit Plan Mode",
 		description: `Exit plan mode and present the plan for user approval. Call this when:
-- Your plan is complete and written to the plan file
+- Your plan is complete and written to the standalone HTML plan file
 - All ambiguities have been resolved (via ask_user or code exploration)
 - The plan covers: what to change, which files to modify, what to reuse, and how to verify
 
@@ -552,20 +573,20 @@ Use ask_user ONLY to clarify requirements or choose between approaches BEFORE fi
 
 	// ---- Event Handlers ----
 
-	// Restrict write/edit to the plan file only
+	// Restrict write/edit to the HTML plan file only
 	pi.on("tool_call", async (event) => {
 		if (!planModeEnabled) return;
 
-		// Restrict write/edit to the plan file only
+		// Restrict write/edit to the HTML plan file only
 		if (event.toolName === "write" || event.toolName === "edit") {
 			const targetPath = (event.input.path as string) ?? "";
 			if (!targetPath || !planFilePath || targetPath !== planFilePath) {
 				return {
 					block: true,
-					reason: `Plan mode: only the plan file can be edited.\nAllowed: ${planFilePath}\nAttempted: ${targetPath}`,
+					reason: `Plan mode: only the HTML plan file can be edited.\nAllowed: ${planFilePath}\nAttempted: ${targetPath}`,
 				};
 			}
-			return; // allow write/edit to plan file
+			return; // allow write/edit to the HTML plan file
 		}
 
 	});
@@ -581,7 +602,7 @@ Use ask_user ONLY to clarify requirements or choose between approaches BEFORE fi
 				message: {
 					customType: "plan-mode-context",
 					content: `[PLAN MODE ACTIVE]
-Plan mode still active (see full instructions earlier in conversation). Direct write/edit tool calls are limited to the plan file (\`${planFilePath}\`).
+Plan mode still active (see full instructions earlier in conversation). Direct write/edit tool calls are limited to the HTML plan file (\`${planFilePath}\`).
 ${planWorkflowReminder()}
 End turns with ask_user (for clarifications) or by calling the exit_plan_mode tool (for plan approval).
 Do not ask about plan approval via text or ask_user — call the exit_plan_mode tool instead.`,
@@ -593,18 +614,18 @@ Do not ask about plan approval via text or ask_user — call the exit_plan_mode 
 		fullInstructionsSent = true;
 
 		const planExistsInfo = readPlanFile(planFilePath)
-			? `A plan file already exists at \`${planFilePath}\`. You can read it and make incremental edits.`
-			: `No plan file exists yet. Create your plan at \`${planFilePath}\` using the write tool.`;
+			? `An HTML plan file already exists at \`${planFilePath}\`. You can read it and make incremental edits.`
+			: `No HTML plan file exists yet. Create a standalone HTML plan at \`${planFilePath}\` using the write tool.`;
 
 		return {
 			message: {
 				customType: "plan-mode-context",
 				content: `[PLAN MODE ACTIVE]
-You are in plan mode. Keep implementation work out of plan mode; direct write/edit tool calls are only allowed for the plan file below. Other registered tools remain available.
+You are in plan mode. Keep implementation work out of plan mode; direct write/edit tool calls are only allowed for the HTML plan file below. Other registered tools remain available.
 
-## Plan File
+## HTML Plan File
 ${planExistsInfo}
-Build your plan incrementally by writing to or editing this file. This is the ONLY file you may edit.
+Build your standalone HTML plan incrementally by writing to or editing this file. This is the ONLY file you may edit.
 
 ${hasAgentTool ? buildAgentFirstWorkflowInstructions() : buildIterativeWorkflowInstructions()}${planDescription ? `\n\n## Task\n${planDescription}` : ""}`,
 				display: false,
