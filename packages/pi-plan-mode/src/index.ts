@@ -219,10 +219,12 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		// Show execution menu
 		const menuOptions: string[] = [];
 		if (hasTodoExtension) {
+			menuOptions.push("Execute with main agent (current context + plan + todo tracking)");
 			menuOptions.push("Execute with main agent (fresh context + plan + todo tracking)");
 			menuOptions.push("Execute with subagent (worker + todo tracking)");
 		} else {
-			menuOptions.push("Execute with main agent");
+			menuOptions.push("Execute with main agent (current context)");
+			menuOptions.push("Execute with main agent (fresh context)");
 			menuOptions.push("Execute with subagent (worker)");
 		}
 		menuOptions.push("Refine the plan");
@@ -230,8 +232,10 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 
 		const choice = await ctx.ui.select("Plan ready — what next?", menuOptions);
 
-		if (choice?.startsWith("Execute with main agent")) {
-			await executeWithMainAgent(ctx);
+		if (choice?.includes("(current context")) {
+			await executeWithMainAgent(ctx, { freshContext: false });
+		} else if (choice?.includes("(fresh context")) {
+			await executeWithMainAgent(ctx, { freshContext: true });
 		} else if (choice?.startsWith("Execute with subagent")) {
 			await executeWithSubagent(ctx);
 		} else if (choice === "Refine the plan") {
@@ -250,18 +254,33 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 	/**
 	 * Execute plan with the main agent.
 	 */
-	async function executeWithMainAgent(ctx: ExtensionContext): Promise<void> {
+	async function executeWithMainAgent(ctx: ExtensionContext, options: { freshContext: boolean }): Promise<void> {
 		planModeEnabled = false;
 		const tools = pi.getAllTools().map((t) => t.name);
 		pi.setActiveTools(tools);
 		updateStatus(ctx);
 		persistState();
 
+		const contextInstruction = options.freshContext
+			? "Focus only on the HTML plan — ignore previous exploration context."
+			: "Keep the current conversation context available while treating the HTML plan as the source of truth.";
 		const executeContent = `Execute the implementation plan saved as standalone HTML at \`${planFilePath}\`.
 
 ${buildTodoInstructions()}
 
-Focus only on the HTML plan — ignore previous exploration context.`;
+${contextInstruction}`;
+
+		if (!options.freshContext) {
+			pi.sendMessage(
+				{
+					customType: "plan-execute",
+					content: executeContent,
+					display: true,
+				},
+				{ triggerTurn: true },
+			);
+			return;
+		}
 
 		// Try to start a fresh session so exploration context is gone
 		const cmdCtx = lastCommandCtx ?? (ctx as any);
