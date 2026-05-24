@@ -1,5 +1,5 @@
 import { StringEnum } from "@earendil-works/pi-ai";
-import { type AgentToolResult, type BashToolDetails, createBashTool, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { type AgentToolResult, type BashToolDetails, createBashTool, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { Key, Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import { normalizeBackgroundCommand } from "./command-normalizer.js";
@@ -52,6 +52,12 @@ interface BackgroundBashDetails {
 	rtkRewriteRemoved?: boolean;
 	cwd: string;
 	startedAt: number;
+}
+
+interface StatusTarget {
+	cwd: string;
+	ui: ExtensionUIContext;
+	generation: number;
 }
 
 function formatDate(ms: number | undefined): string {
@@ -115,46 +121,59 @@ function formatWaitResult(job: BackgroundBashJob, timedOut: boolean): string {
 export default function backgroundBashExtension(pi: ExtensionAPI): void {
 	const manager = new BackgroundBashManager();
 	const foregroundBash = createBashTool(process.cwd());
-	let currentCtx: ExtensionContext | undefined;
+	let statusTarget: StatusTarget | undefined;
 	let statusPollTimer: ReturnType<typeof setInterval> | undefined;
 	let statusUpdateRunning = false;
+	let statusGeneration = 0;
 
-	const updateStatus = async (ctx = currentCtx) => {
-		if (!ctx?.hasUI || statusUpdateRunning) return;
+	const createStatusTarget = (ctx: ExtensionContext, cwd: string): StatusTarget | undefined => {
+		if (!ctx.hasUI) return undefined;
+		return { cwd, ui: ctx.ui, generation: statusGeneration };
+	};
+
+	const updateStatus = async (target: StatusTarget | undefined) => {
+		if (!target || target.generation !== statusGeneration || statusUpdateRunning) return;
 		statusUpdateRunning = true;
 		try {
-			const running = await manager.list(ctx.cwd, "running");
+			const running = await manager.list(target.cwd, "running");
+			if (target.generation !== statusGeneration) return;
 			const count = running.length;
 			const label = count === 1 ? "1 job" : `${count} jobs`;
-			const icon = count > 0 ? ctx.ui.theme.fg("accent", "●") : ctx.ui.theme.fg("dim", "○");
-			const text = count > 0 ? ctx.ui.theme.fg("accent", label) : ctx.ui.theme.fg("dim", label);
-			ctx.ui.setStatus("background-bash", `${icon} ${text}`);
+			const icon = count > 0 ? target.ui.theme.fg("accent", "●") : target.ui.theme.fg("dim", "○");
+			const text = count > 0 ? target.ui.theme.fg("accent", label) : target.ui.theme.fg("dim", label);
+			target.ui.setStatus("background-bash", `${icon} ${text}`);
 		} catch {
-			ctx.ui.setStatus("background-bash", ctx.ui.theme.fg("warning", "jobs ?"));
+			if (target.generation !== statusGeneration) return;
+			target.ui.setStatus("background-bash", target.ui.theme.fg("warning", "jobs ?"));
 		} finally {
 			statusUpdateRunning = false;
 		}
 	};
 
 	const startStatusPolling = (ctx: ExtensionContext) => {
-		currentCtx = ctx;
+		statusGeneration++;
 		if (statusPollTimer) clearInterval(statusPollTimer);
-		void updateStatus(ctx);
-		statusPollTimer = setInterval(() => void updateStatus(), 5000);
+		const target = createStatusTarget(ctx, ctx.cwd);
+		statusTarget = target;
+		void updateStatus(target);
+		statusPollTimer = target ? setInterval(() => void updateStatus(target), 5000) : undefined;
 	};
 
-	const stopStatusPolling = (ctx?: ExtensionContext) => {
+	const stopStatusPolling = () => {
+		statusGeneration++;
 		if (statusPollTimer) {
 			clearInterval(statusPollTimer);
 			statusPollTimer = undefined;
 		}
-		(ctx ?? currentCtx)?.ui.setStatus("background-bash", undefined);
-		currentCtx = undefined;
+		statusTarget?.ui.setStatus("background-bash", undefined);
+		statusTarget = undefined;
 	};
 
 	const openOverlay = async (ctx: ExtensionContext) => {
-		await ctx.ui.custom<void>(
-			(tui, theme, _keybindings, done) => new BackgroundBashOverlay(manager, ctx.cwd, theme, () => done(undefined), () => tui.requestRender()),
+		const target = createStatusTarget(ctx, ctx.cwd);
+		if (!target) return;
+		await target.ui.custom<void>(
+			(tui, theme, _keybindings, done) => new BackgroundBashOverlay(manager, target.cwd, theme, () => done(undefined), () => tui.requestRender()),
 			{
 				overlay: true,
 				overlayOptions: {
@@ -165,15 +184,15 @@ export default function backgroundBashExtension(pi: ExtensionAPI): void {
 				},
 			},
 		);
-		await updateStatus(ctx);
+		await updateStatus(target);
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
 		startStatusPolling(ctx);
 	});
 
-	pi.on("session_shutdown", async (_event, ctx) => {
-		stopStatusPolling(ctx);
+	pi.on("session_shutdown", async () => {
+		stopStatusPolling();
 	});
 
 	pi.registerTool({
@@ -195,8 +214,10 @@ export default function backgroundBashExtension(pi: ExtensionAPI): void {
 			}
 
 			const normalized = normalizeBackgroundCommand(params.command);
-			const job = await manager.start(normalized.command, ctx.cwd);
-			await updateStatus(ctx);
+			const cwd = ctx.cwd;
+			const target = createStatusTarget(ctx, cwd);
+			const job = await manager.start(normalized.command, cwd);
+			await updateStatus(target);
 			const notice = normalized.rtkRewriteRemoved
 				? "\n\nRTK rewrite was removed for this background job so output streams directly to the log file."
 				: "";
@@ -231,8 +252,10 @@ export default function backgroundBashExtension(pi: ExtensionAPI): void {
 		promptSnippet: "List project-local background bash jobs and their log paths",
 		parameters: ListBackgroundBashParams,
 		async execute(_toolCallId, params: ListBackgroundBashParams, _signal, _onUpdate, ctx) {
-			const jobs = await manager.list(ctx.cwd, (params.status ?? "all") as BackgroundBashStatusFilter);
-			await updateStatus(ctx);
+			const cwd = ctx.cwd;
+			const target = createStatusTarget(ctx, cwd);
+			const jobs = await manager.list(cwd, (params.status ?? "all") as BackgroundBashStatusFilter);
+			await updateStatus(target);
 			return {
 				content: [{ type: "text", text: formatJobList(jobs) }],
 				details: { jobs: jobs.map((job) => ({ meta: job.meta, status: job.status })) },
@@ -247,8 +270,10 @@ export default function backgroundBashExtension(pi: ExtensionAPI): void {
 		promptSnippet: "Wait for a background bash job and return status plus log path",
 		parameters: WaitBackgroundBashParams,
 		async execute(_toolCallId, params: WaitBackgroundBashParams, signal, _onUpdate, ctx) {
-			const result = await manager.wait(ctx.cwd, params.id, params.timeout, signal);
-			await updateStatus(ctx);
+			const cwd = ctx.cwd;
+			const target = createStatusTarget(ctx, cwd);
+			const result = await manager.wait(cwd, params.id, params.timeout, signal);
+			await updateStatus(target);
 			return {
 				content: [{ type: "text", text: formatWaitResult(result.job, result.timedOut) }],
 				details: { job: result.job, timedOut: result.timedOut },
@@ -263,8 +288,10 @@ export default function backgroundBashExtension(pi: ExtensionAPI): void {
 		promptSnippet: "Stop a running background bash job by id",
 		parameters: StopBackgroundBashParams,
 		async execute(_toolCallId, params: StopBackgroundBashParams, _signal, _onUpdate, ctx) {
-			const job = await manager.stop(ctx.cwd, params.id, params.signal ?? "SIGTERM");
-			await updateStatus(ctx);
+			const cwd = ctx.cwd;
+			const target = createStatusTarget(ctx, cwd);
+			const job = await manager.stop(cwd, params.id, params.signal ?? "SIGTERM");
+			await updateStatus(target);
 			return {
 				content: [{ type: "text", text: `Background bash stop result.\n\n${formatJobDetails(job)}` }],
 				details: { job },
