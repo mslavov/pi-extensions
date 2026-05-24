@@ -27,6 +27,19 @@
         "@earendil-works/pi-tui": "*",
       },
     },
+    "packages/pi-background-bash": {
+      "name": "pi-background-bash",
+      "version": "0.1.0",
+      "devDependencies": {
+        "typescript": "^6.0.2",
+      },
+      "peerDependencies": {
+        "@earendil-works/pi-ai": "*",
+        "@earendil-works/pi-coding-agent": "*",
+        "@earendil-works/pi-tui": "*",
+        "typebox": "*",
+      },
+    },
     "packages/pi-claude-code": {
       "name": "pi-claude-code",
       "version": "0.1.0",
@@ -737,6 +750,8 @@
     "pend": ["pend@1.2.0", "", {}, "sha512-F3asv42UuXchdzt+xXqfW1OGlVBe+mxa2mqI0pg5yAHZPvFmY3Y6drSf/GQ1A86WgWEN9Kzh/WrgKa6iGcHXLg=="],
 
     "pi-autocomplete": ["pi-autocomplete@workspace:packages/pi-autocomplete"],
+
+    "pi-background-bash": ["pi-background-bash@workspace:packages/pi-background-bash"],
 
     "pi-claude-code": ["pi-claude-code@workspace:packages/pi-claude-code"],
 
