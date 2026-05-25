@@ -1,5 +1,7 @@
 node_modules/
 dist/
+!packages/pi-insights/dist/
+!packages/pi-insights/dist/**
 .turbo/
 .harness-evals/
 *.tsbuildinfo

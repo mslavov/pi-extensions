@@ -1,29 +1,32 @@
-import { mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
-import { basename, extname, join } from "node:path";
-import { homedir } from "node:os";
-import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
+import { createConnection, type Socket } from "node:net";
+import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { basename, dirname, extname } from "node:path";
+import { randomBytes, randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-interface TelegramConfig {
-	botToken?: string;
-	botUsername?: string;
-	botId?: number;
-	allowedUserId?: number;
-	lastUpdateId?: number;
-}
-
-interface TelegramOwnerLease {
-	id: string;
-	pid: number;
-	cwd: string;
-	claimedAt: number;
-	updatedAt: number;
-	expiresAt: number;
-}
+import {
+	BROKER_SOCKET_PATH,
+	CONFIG_PATH,
+	MAX_ATTACHMENTS_PER_TURN,
+	OLD_CONFIG_PATH,
+	TELEGRAM_DIR,
+	TELEGRAM_PREFIX,
+	TELEGRAM_PROGRESS_MAX_LENGTH,
+	TEMP_DIR,
+	type BrokerStatus,
+	type BrokerToClient,
+	type ClientToBroker,
+	type DownloadedTelegramFile,
+	type QueuedAttachment,
+	type SessionSnippet,
+	type TelegramConfig,
+} from "./protocol.js";
 
 interface TelegramApiResponse<T> {
 	ok: boolean;
@@ -39,100 +42,8 @@ interface TelegramUser {
 	username?: string;
 }
 
-interface TelegramChat {
-	id: number;
-	type: string;
-}
-
-interface TelegramPhotoSize {
-	file_id: string;
-	file_size?: number;
-}
-
-interface TelegramDocument {
-	file_id: string;
-	file_name?: string;
-	mime_type?: string;
-	file_size?: number;
-}
-
-interface TelegramVideo {
-	file_id: string;
-	file_name?: string;
-	mime_type?: string;
-	file_size?: number;
-}
-
-interface TelegramAudio {
-	file_id: string;
-	file_name?: string;
-	mime_type?: string;
-	file_size?: number;
-}
-
-interface TelegramVoice {
-	file_id: string;
-	mime_type?: string;
-	file_size?: number;
-}
-
-interface TelegramAnimation {
-	file_id: string;
-	file_name?: string;
-	mime_type?: string;
-	file_size?: number;
-}
-
-interface TelegramSticker {
-	file_id: string;
-	emoji?: string;
-}
-
-interface TelegramFileInfo {
-	file_id: string;
-	fileName: string;
-	mimeType?: string;
-	isImage: boolean;
-}
-
-interface TelegramMessage {
-	message_id: number;
-	chat: TelegramChat;
-	from?: TelegramUser;
-	text?: string;
-	caption?: string;
-	media_group_id?: string;
-	photo?: TelegramPhotoSize[];
-	document?: TelegramDocument;
-	video?: TelegramVideo;
-	audio?: TelegramAudio;
-	voice?: TelegramVoice;
-	animation?: TelegramAnimation;
-	sticker?: TelegramSticker;
-}
-
-interface TelegramUpdate {
-	update_id: number;
-	message?: TelegramMessage;
-	edited_message?: TelegramMessage;
-}
-
-interface TelegramGetFileResult {
-	file_path: string;
-}
-
-interface TelegramSentMessage {
-	message_id: number;
-}
-
-interface DownloadedTelegramFile {
-	path: string;
-	fileName: string;
-	isImage: boolean;
-	mimeType?: string;
-}
-
 interface PendingTelegramTurn {
+	requestId: string;
 	chatId: number;
 	replyToMessageId: number;
 	queuedAttachments: QueuedAttachment[];
@@ -142,24 +53,7 @@ interface PendingTelegramTurn {
 
 type ActiveTelegramTurn = PendingTelegramTurn;
 
-interface QueuedAttachment {
-	path: string;
-	fileName: string;
-}
-
-interface TelegramPreviewState {
-	mode: "draft" | "message";
-	draftId?: number;
-	messageId?: number;
-	pendingText: string;
-	lastSentText: string;
-	flushTimer?: ReturnType<typeof setTimeout>;
-}
-
-interface TelegramMediaGroupState {
-	messages: TelegramMessage[];
-	flushTimer?: ReturnType<typeof setTimeout>;
-}
+type TelegramPreviewTextMessage = AgentMessage & { role?: string };
 
 interface TelegramProgressSendResult {
 	sent: boolean;
@@ -167,22 +61,10 @@ interface TelegramProgressSendResult {
 	reason?: string;
 }
 
-const TELEGRAM_DIR = join(homedir(), ".pi", "agent", "extensions", "telegram");
-const OLD_CONFIG_PATH = join(homedir(), ".pi", "agent", "telegram.json");
-const CONFIG_PATH = join(TELEGRAM_DIR, "telegram.json");
-const OWNER_PATH = join(TELEGRAM_DIR, "owner.json");
-const TEMP_DIR = join(TELEGRAM_DIR, "tmp");
-const TELEGRAM_PREFIX = "[telegram]";
-const MAX_MESSAGE_LENGTH = 4096;
-const MAX_ATTACHMENTS_PER_TURN = 10;
-const PREVIEW_THROTTLE_MS = 750;
-const TELEGRAM_DRAFT_ID_MAX = 2_147_483_647;
-const TELEGRAM_MEDIA_GROUP_DEBOUNCE_MS = 1200;
-const TELEGRAM_PROGRESS_MAX_LENGTH = 500;
 const TELEGRAM_ERROR_NOTIFY_DELAY_MS = 20_000;
-const TELEGRAM_ERROR_MAX_LENGTH = 1500;
-const OWNER_HEARTBEAT_MS = 5_000;
-const OWNER_LEASE_TTL_MS = 15_000;
+const SESSION_UPDATE_INTERVAL_MS = 5_000;
+const SESSION_HISTORY_LIMIT = 12;
+const SESSION_HISTORY_TEXT_LIMIT = 800;
 
 const SYSTEM_PROMPT_SUFFIX = `
 
@@ -194,103 +76,6 @@ Telegram bridge extension is active.
 
 function isTelegramPrompt(prompt: string): boolean {
 	return prompt.trimStart().startsWith(TELEGRAM_PREFIX);
-}
-
-function sanitizeFileName(name: string): string {
-	return name.replace(/[^a-zA-Z0-9._-]+/g, "_");
-}
-
-function guessExtensionFromMime(mimeType: string | undefined, fallback: string): string {
-	if (!mimeType) return fallback;
-	const normalized = mimeType.toLowerCase();
-	if (normalized === "image/jpeg") return ".jpg";
-	if (normalized === "image/png") return ".png";
-	if (normalized === "image/webp") return ".webp";
-	if (normalized === "image/gif") return ".gif";
-	if (normalized === "audio/ogg") return ".ogg";
-	if (normalized === "audio/mpeg") return ".mp3";
-	if (normalized === "audio/wav") return ".wav";
-	if (normalized === "video/mp4") return ".mp4";
-	if (normalized === "application/pdf") return ".pdf";
-	return fallback;
-}
-
-function guessMediaType(path: string): string | undefined {
-	const ext = extname(path).toLowerCase();
-	if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
-	if (ext === ".png") return "image/png";
-	if (ext === ".webp") return "image/webp";
-	if (ext === ".gif") return "image/gif";
-	return undefined;
-}
-
-function isImageMimeType(mimeType: string | undefined): boolean {
-	return mimeType?.toLowerCase().startsWith("image/") ?? false;
-}
-
-function formatTokens(count: number): string {
-	if (count < 1000) return count.toString();
-	if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
-	if (count < 1000000) return `${Math.round(count / 1000)}k`;
-	if (count < 10000000) return `${(count / 1000000).toFixed(1)}M`;
-	return `${Math.round(count / 1000000)}M`;
-}
-
-function chunkParagraphs(text: string): string[] {
-	if (text.length <= MAX_MESSAGE_LENGTH) return [text];
-
-	const normalized = text.replace(/\r\n/g, "\n");
-	const paragraphs = normalized.split(/\n\n+/);
-	const chunks: string[] = [];
-	let current = "";
-
-	const flushCurrent = (): void => {
-		if (current.trim().length > 0) chunks.push(current);
-		current = "";
-	};
-
-	const splitLongBlock = (block: string): string[] => {
-		if (block.length <= MAX_MESSAGE_LENGTH) return [block];
-		const lines = block.split("\n");
-		const lineChunks: string[] = [];
-		let lineCurrent = "";
-		for (const line of lines) {
-			const candidate = lineCurrent.length === 0 ? line : `${lineCurrent}\n${line}`;
-			if (candidate.length <= MAX_MESSAGE_LENGTH) {
-				lineCurrent = candidate;
-				continue;
-			}
-			if (lineCurrent.length > 0) {
-				lineChunks.push(lineCurrent);
-				lineCurrent = "";
-			}
-			if (line.length <= MAX_MESSAGE_LENGTH) {
-				lineCurrent = line;
-				continue;
-			}
-			for (let i = 0; i < line.length; i += MAX_MESSAGE_LENGTH) {
-				lineChunks.push(line.slice(i, i + MAX_MESSAGE_LENGTH));
-			}
-		}
-		if (lineCurrent.length > 0) lineChunks.push(lineCurrent);
-		return lineChunks;
-	};
-
-	for (const paragraph of paragraphs) {
-		if (paragraph.length === 0) continue;
-		const parts = splitLongBlock(paragraph);
-		for (const part of parts) {
-			const candidate = current.length === 0 ? part : `${current}\n\n${part}`;
-			if (candidate.length <= MAX_MESSAGE_LENGTH) {
-				current = candidate;
-			} else {
-				flushCurrent();
-				current = part;
-			}
-		}
-	}
-	flushCurrent();
-	return chunks;
 }
 
 function isNodeError(error: unknown, code: string): boolean {
@@ -320,8 +105,7 @@ async function readConfig(): Promise<TelegramConfig> {
 	await migrateConfig();
 	try {
 		const content = await readFile(CONFIG_PATH, "utf8");
-		const parsed = JSON.parse(content) as TelegramConfig;
-		return parsed;
+		return JSON.parse(content) as TelegramConfig;
 	} catch {
 		return {};
 	}
@@ -332,448 +116,553 @@ async function writeConfig(config: TelegramConfig): Promise<void> {
 	await writeFile(CONFIG_PATH, JSON.stringify(config, null, "\t") + "\n", "utf8");
 }
 
-async function readOwnerLease(): Promise<TelegramOwnerLease | undefined> {
-	try {
-		const content = await readFile(OWNER_PATH, "utf8");
-		return JSON.parse(content) as TelegramOwnerLease;
-	} catch {
-		return undefined;
-	}
+async function ensureBrokerSecret(config: TelegramConfig): Promise<TelegramConfig> {
+	if (config.brokerSecret) return config;
+	const nextConfig = { ...config, brokerSecret: randomBytes(32).toString("hex") };
+	await writeConfig(nextConfig);
+	return nextConfig;
 }
 
-function serializeOwnerLease(lease: TelegramOwnerLease): string {
-	return JSON.stringify(lease, null, "\t") + "\n";
+function guessMediaType(path: string): string | undefined {
+	const ext = extname(path).toLowerCase();
+	if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
+	if (ext === ".png") return "image/png";
+	if (ext === ".webp") return "image/webp";
+	if (ext === ".gif") return "image/gif";
+	return undefined;
 }
 
-async function writeOwnerLease(lease: TelegramOwnerLease): Promise<void> {
-	await ensureTelegramDir();
-	await writeFile(OWNER_PATH, serializeOwnerLease(lease), "utf8");
+function formatTokens(count: number): string {
+	if (count < 1000) return count.toString();
+	if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
+	if (count < 1000000) return `${Math.round(count / 1000)}k`;
+	if (count < 10000000) return `${(count / 1000000).toFixed(1)}M`;
+	return `${Math.round(count / 1000000)}M`;
 }
 
-async function writeOwnerLeaseExclusive(lease: TelegramOwnerLease): Promise<boolean> {
-	await ensureTelegramDir();
-	try {
-		await writeFile(OWNER_PATH, serializeOwnerLease(lease), { encoding: "utf8", flag: "wx" });
-		return true;
-	} catch (error) {
-		if (isNodeError(error, "EEXIST")) return false;
-		throw error;
-	}
+function isStaleContextError(error: unknown): boolean {
+	const message = error instanceof Error ? error.message : String(error);
+	return message.includes("extension ctx is stale") || message.includes("captured pi or command ctx");
 }
 
-async function removeOwnerLease(): Promise<void> {
-	try {
-		await unlink(OWNER_PATH);
-	} catch (error) {
-		if (!isNodeError(error, "ENOENT")) throw error;
-	}
+function getMessageText(message: AgentMessage): string {
+	const value = message as unknown as Record<string, unknown>;
+	const content = Array.isArray(value.content) ? value.content : [];
+	return content
+		.filter((block): block is { type: string; text?: string } => typeof block === "object" && block !== null && "type" in block)
+		.filter((block) => block.type === "text" && typeof block.text === "string")
+		.map((block) => block.text as string)
+		.join("")
+		.trim();
 }
 
-function createOwnerLease(id: string, cwd: string, claimedAt = Date.now()): TelegramOwnerLease {
-	const now = Date.now();
-	return {
-		id,
-		pid: process.pid,
-		cwd,
-		claimedAt,
-		updatedAt: now,
-		expiresAt: now + OWNER_LEASE_TTL_MS,
-	};
+function isAssistantMessage(message: TelegramPreviewTextMessage): boolean {
+	return message.role === "assistant";
 }
 
-function isOwnerLeaseActive(lease: TelegramOwnerLease, now = Date.now()): boolean {
-	return lease.expiresAt > now;
-}
-
-function formatOwnerLease(lease: TelegramOwnerLease): string {
-	const ageSeconds = Math.max(0, Math.round((Date.now() - lease.updatedAt) / 1000));
-	return `${lease.cwd} (pid ${lease.pid}, updated ${ageSeconds}s ago)`;
-}
-
-export default function (pi: ExtensionAPI) {
-	const ownerId = randomUUID();
-	let config: TelegramConfig = {};
-	let ownerLease: TelegramOwnerLease | undefined;
-	let ownerConflict: string | undefined;
-	let ownerHeartbeatInterval: ReturnType<typeof setInterval> | undefined;
-	let pollingController: AbortController | undefined;
-	let pollingPromise: Promise<void> | undefined;
-	let queuedTelegramTurns: PendingTelegramTurn[] = [];
-	let activeTelegramTurn: ActiveTelegramTurn | undefined;
-	let typingInterval: ReturnType<typeof setInterval> | undefined;
-	let currentAbort: (() => void) | undefined;
-	let preserveQueuedTurnsAsHistory = false;
-	let setupInProgress = false;
-	let previewState: TelegramPreviewState | undefined;
-	let pendingLocalErrorTimer: ReturnType<typeof setTimeout> | undefined;
-	let draftSupport: "unknown" | "supported" | "unsupported" = "unknown";
-	let nextDraftId = 0;
-	const mediaGroups = new Map<string, TelegramMediaGroupState>();
-
-	function allocateDraftId(): number {
-		nextDraftId = nextDraftId >= TELEGRAM_DRAFT_ID_MAX ? 1 : nextDraftId + 1;
-		return nextDraftId;
-	}
-
-	function updateStatus(ctx: ExtensionContext, error?: string): void {
-		try {
-			const theme = ctx.ui.theme;
-			const label = theme.fg("accent", "telegram");
-			if (error) {
-				ctx.ui.setStatus("telegram", `${label} ${theme.fg("error", "error")} ${theme.fg("muted", error)}`);
-				return;
-			}
-			if (!config.botToken || !pollingPromise) {
-				ctx.ui.setStatus("telegram", undefined);
-				return;
-			}
-			if (!config.allowedUserId) {
-				ctx.ui.setStatus("telegram", `${label} ${theme.fg("warning", "awaiting pairing")}`);
-				return;
-			}
-			if (activeTelegramTurn || queuedTelegramTurns.length > 0) {
-				const queued = queuedTelegramTurns.length > 0 ? theme.fg("muted", ` +${queuedTelegramTurns.length} queued`) : "";
-				ctx.ui.setStatus("telegram", `${label} ${theme.fg("accent", "processing")}${queued}`);
-				return;
-			}
-			ctx.ui.setStatus("telegram", `${label} ${theme.fg("success", "connected")}`);
-		} catch (error) {
-			if (isStaleContextError(error)) return;
-			throw error;
-		}
-	}
-
-	function isStaleContextError(error: unknown): boolean {
-		const message = error instanceof Error ? error.message : String(error);
-		return message.includes("extension ctx is stale") || message.includes("captured pi or command ctx");
-	}
-
-	function sendUserMessageSafely(content: Array<TextContent | ImageContent>): void {
-		try {
-			pi.sendUserMessage(content);
-		} catch (error) {
-			if (isStaleContextError(error)) return;
-			throw error;
-		}
-	}
-
-	function stopOwnerHeartbeat(): void {
-		if (!ownerHeartbeatInterval) return;
-		clearInterval(ownerHeartbeatInterval);
-		ownerHeartbeatInterval = undefined;
-	}
-
-	async function releaseOwnerLease(): Promise<void> {
-		const current = await readOwnerLease();
-		if (current?.id === ownerId) {
-			await removeOwnerLease();
-		}
-		ownerLease = undefined;
-		ownerConflict = undefined;
-	}
-
-	async function refreshOwnerLease(cwd: string, ctx: ExtensionContext): Promise<void> {
-		const current = await readOwnerLease();
-		if (!current || current.id !== ownerId) {
-			ownerLease = undefined;
-			ownerConflict = current && isOwnerLeaseActive(current) ? formatOwnerLease(current) : undefined;
-			await stopPolling({ releaseOwner: false });
-			updateStatus(ctx, ownerConflict ? `lease lost to ${ownerConflict}` : "lease lost");
-			return;
-		}
-
-		ownerLease = createOwnerLease(ownerId, cwd, current.claimedAt);
-		await writeOwnerLease(ownerLease);
-	}
-
-	function startOwnerHeartbeat(ctx: ExtensionContext): void {
-		if (ownerHeartbeatInterval) return;
-		const cwd = ctx.cwd;
-		ownerHeartbeatInterval = setInterval(() => {
-			void refreshOwnerLease(cwd, ctx).catch((error) => {
-				if (isStaleContextError(error)) {
-					stopOwnerHeartbeat();
-					return;
-				}
-				const message = error instanceof Error ? error.message : String(error);
-				updateStatus(ctx, message);
-			});
-		}, OWNER_HEARTBEAT_MS);
-	}
-
-	async function claimOwnerLease(ctx: ExtensionContext, options: { force?: boolean } = {}): Promise<boolean> {
-		const existing = await readOwnerLease();
-		const previousOwner = existing && existing.id !== ownerId && isOwnerLeaseActive(existing) ? formatOwnerLease(existing) : undefined;
-
-		if (previousOwner && !options.force) {
-			ownerConflict = previousOwner;
-			ctx.ui.notify(`Telegram bridge is already connected in ${previousOwner}. Run /telegram-takeover here to move it.`, "warning");
-			updateStatus(ctx);
-			return false;
-		}
-
-		const nextLease = createOwnerLease(ownerId, ctx.cwd);
-		if (options.force) {
-			await writeOwnerLease(nextLease);
-		} else {
-			if (existing) {
-				await removeOwnerLease();
-			}
-			let claimed = await writeOwnerLeaseExclusive(nextLease);
-			if (!claimed) {
-				const current = await readOwnerLease();
-				if (current && current.id !== ownerId && isOwnerLeaseActive(current)) {
-					ownerConflict = formatOwnerLease(current);
-					ctx.ui.notify(`Telegram bridge is already connected in ${ownerConflict}. Run /telegram-takeover here to move it.`, "warning");
-					updateStatus(ctx);
-					return false;
-				}
-				await removeOwnerLease();
-				claimed = await writeOwnerLeaseExclusive(nextLease);
-				if (!claimed) {
-					ownerConflict = "another pi session";
-					ctx.ui.notify("Telegram bridge ownership changed while connecting. Try /telegram-connect again.", "warning");
-					updateStatus(ctx);
-					return false;
-				}
-			}
-		}
-
-		ownerLease = nextLease;
-		ownerConflict = undefined;
-		startOwnerHeartbeat(ctx);
-		if (previousOwner && options.force) {
-			ctx.ui.notify(`Telegram bridge taken over from ${previousOwner}.`, "info");
-		}
-		return true;
-	}
-
-	async function refreshOwnerConflict(): Promise<void> {
-		const current = await readOwnerLease();
-		ownerConflict = current && current.id !== ownerId && isOwnerLeaseActive(current) ? formatOwnerLease(current) : undefined;
-	}
-
-	async function callTelegram<TResponse>(
-		method: string,
-		body: Record<string, unknown>,
-		options?: { signal?: AbortSignal },
-	): Promise<TResponse> {
-		if (!config.botToken) throw new Error("Telegram bot token is not configured");
-		const response = await fetch(`https://api.telegram.org/bot${config.botToken}/${method}`, {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify(body),
-			signal: options?.signal,
-		});
-		const data = (await response.json()) as TelegramApiResponse<TResponse>;
-		if (!data.ok || data.result === undefined) {
-			throw new Error(data.description || `Telegram API ${method} failed`);
-		}
-		return data.result;
-	}
-
-	async function callTelegramMultipart<TResponse>(
-		method: string,
-		fields: Record<string, string>,
-		fileField: string,
-		filePath: string,
-		fileName: string,
-		options?: { signal?: AbortSignal },
-	): Promise<TResponse> {
-		if (!config.botToken) throw new Error("Telegram bot token is not configured");
-		const form = new FormData();
-		for (const [key, value] of Object.entries(fields)) {
-			form.set(key, value);
-		}
-		const buffer = await readFile(filePath);
-		form.set(fileField, new Blob([buffer]), fileName);
-		const response = await fetch(`https://api.telegram.org/bot${config.botToken}/${method}`, {
-			method: "POST",
-			body: form,
-			signal: options?.signal,
-		});
-		const data = (await response.json()) as TelegramApiResponse<TResponse>;
-		if (!data.ok || data.result === undefined) {
-			throw new Error(data.description || `Telegram API ${method} failed`);
-		}
-		return data.result;
-	}
-
-	async function downloadTelegramFile(fileId: string, suggestedName: string): Promise<string> {
-		if (!config.botToken) throw new Error("Telegram bot token is not configured");
-		const file = await callTelegram<TelegramGetFileResult>("getFile", { file_id: fileId });
-		await mkdir(TEMP_DIR, { recursive: true });
-		const targetPath = join(TEMP_DIR, `${Date.now()}-${sanitizeFileName(suggestedName)}`);
-		const response = await fetch(`https://api.telegram.org/file/bot${config.botToken}/${file.file_path}`);
-		if (!response.ok) throw new Error(`Failed to download Telegram file: ${response.status}`);
-		const arrayBuffer = await response.arrayBuffer();
-		await writeFile(targetPath, Buffer.from(arrayBuffer));
-		return targetPath;
-	}
-
-	function startTypingLoop(ctx: ExtensionContext, chatId?: number): void {
-		const targetChatId = chatId ?? activeTelegramTurn?.chatId;
-		if (typingInterval || targetChatId === undefined) return;
-
-		const sendTyping = async (): Promise<void> => {
-			try {
-				await callTelegram("sendChatAction", { chat_id: targetChatId, action: "typing" });
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				updateStatus(ctx, `typing failed: ${message}`);
-			}
-		};
-
-		void sendTyping();
-		typingInterval = setInterval(() => {
-			void sendTyping();
-		}, 4000);
-	}
-
-	function stopTypingLoop(): void {
-		if (!typingInterval) return;
-		clearInterval(typingInterval);
-		typingInterval = undefined;
-	}
-
-	function isAssistantMessage(message: AgentMessage): boolean {
-		return (message as unknown as { role?: string }).role === "assistant";
-	}
-
-	function getMessageText(message: AgentMessage): string {
-		const value = message as unknown as Record<string, unknown>;
-		const content = Array.isArray(value.content) ? value.content : [];
-		return content
+function extractAssistantText(messages: AgentMessage[]): { text?: string; stopReason?: string; errorMessage?: string } {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = messages[i] as unknown as Record<string, unknown>;
+		if (message.role !== "assistant") continue;
+		const stopReason = typeof message.stopReason === "string" ? message.stopReason : undefined;
+		const errorMessage = typeof message.errorMessage === "string" ? message.errorMessage : undefined;
+		const content = Array.isArray(message.content) ? message.content : [];
+		const text = content
 			.filter((block): block is { type: string; text?: string } => typeof block === "object" && block !== null && "type" in block)
 			.filter((block) => block.type === "text" && typeof block.text === "string")
 			.map((block) => block.text as string)
 			.join("")
 			.trim();
+		return { text: text || undefined, stopReason, errorMessage };
+	}
+	return {};
+}
+
+function clampProgressText(text: string): string {
+	const normalized = text.trim().replace(/\s+/g, " ");
+	return normalized.length > TELEGRAM_PROGRESS_MAX_LENGTH ? normalized.slice(0, TELEGRAM_PROGRESS_MAX_LENGTH).trimEnd() : normalized;
+}
+
+function formatTelegramHistoryText(rawText: string, files: DownloadedTelegramFile[]): string {
+	let summary = rawText.length > 0 ? rawText : "(no text)";
+	if (files.length > 0) {
+		summary += `\nAttachments:`;
+		for (const file of files) {
+			summary += `\n- ${file.path}`;
+		}
+	}
+	return summary;
+}
+
+async function createTelegramTurn(
+	delivery: Extract<BrokerToClient, { type: "deliver_turn" }>,
+	historyTurns: PendingTelegramTurn[] = [],
+): Promise<PendingTelegramTurn> {
+	const rawText = delivery.rawText.trim();
+	const files = delivery.files;
+	const content: Array<TextContent | ImageContent> = [];
+	let prompt = `${TELEGRAM_PREFIX}`;
+
+	if (historyTurns.length > 0) {
+		prompt += `\n\nEarlier Telegram messages arrived after an aborted turn. Treat them as prior user messages, in order:`;
+		for (const [index, turn] of historyTurns.entries()) {
+			prompt += `\n\n${index + 1}. ${turn.historyText}`;
+		}
+		prompt += `\n\nCurrent Telegram message:`;
 	}
 
-	async function clearPreview(chatId: number): Promise<void> {
-		const state = previewState;
-		if (!state) return;
-		if (state.flushTimer) {
-			clearTimeout(state.flushTimer);
-			state.flushTimer = undefined;
-		}
-		previewState = undefined;
-		if (state.mode === "draft" && state.draftId !== undefined) {
-			try {
-				await callTelegram("sendMessageDraft", { chat_id: chatId, draft_id: state.draftId, text: "" });
-			} catch {
-				// ignore
-			}
+	if (rawText.length > 0) {
+		prompt += historyTurns.length > 0 ? `\n${rawText}` : ` ${rawText}`;
+	}
+	if (files.length > 0) {
+		prompt += `\n\nTelegram attachments were saved locally:`;
+		for (const file of files) {
+			prompt += `\n- ${file.path}`;
 		}
 	}
+	content.push({ type: "text", text: prompt });
 
-	async function flushPreview(chatId: number): Promise<void> {
-		const state = previewState;
-		if (!state) return;
-		state.flushTimer = undefined;
-		const text = state.pendingText.trim();
-		if (!text || text === state.lastSentText) return;
-		const truncated = text.length > MAX_MESSAGE_LENGTH ? text.slice(0, MAX_MESSAGE_LENGTH) : text;
+	for (const file of files) {
+		if (!file.isImage) continue;
+		const mediaType = file.mimeType || guessMediaType(file.path);
+		if (!mediaType) continue;
+		const buffer = await readFile(file.path);
+		content.push({
+			type: "image",
+			data: buffer.toString("base64"),
+			mimeType: mediaType,
+		});
+	}
 
-		if (draftSupport !== "unsupported") {
-			const draftId = state.draftId ?? allocateDraftId();
-			state.draftId = draftId;
-			try {
-				await callTelegram("sendMessageDraft", { chat_id: chatId, draft_id: draftId, text: truncated });
-				draftSupport = "supported";
-				state.mode = "draft";
-				state.lastSentText = truncated;
-				return;
-			} catch {
-				draftSupport = "unsupported";
-			}
-		}
+	return {
+		requestId: delivery.requestId,
+		chatId: delivery.chatId,
+		replyToMessageId: delivery.replyToMessageId,
+		queuedAttachments: [],
+		content,
+		historyText: formatTelegramHistoryText(rawText, files),
+	};
+}
 
-		if (state.messageId === undefined) {
-			const sent = await callTelegram<TelegramSentMessage>("sendMessage", { chat_id: chatId, text: truncated });
-			state.messageId = sent.message_id;
-			state.mode = "message";
-			state.lastSentText = truncated;
+class BrokerClient {
+	private socket: Socket | undefined;
+	private buffer = "";
+	private requests = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
+	private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+	connected = false;
+	paired = false;
+	lastError: string | undefined;
+
+	constructor(
+		private readonly connectionId: string,
+		private readonly getSecret: () => string | undefined,
+		private readonly getSnapshot: (ctx: ExtensionContext) => Omit<ClientToBroker & { type: "hello" }, "v" | "type" | "brokerSecret">,
+		private readonly onDeliverTurn: (delivery: Extract<BrokerToClient, { type: "deliver_turn" }>, ctx: ExtensionContext) => Promise<void>,
+		private readonly updateStatus: (ctx: ExtensionContext, error?: string) => void,
+	) {}
+
+	async connect(ctx: ExtensionContext): Promise<void> {
+		if (this.connected) {
+			this.sendSessionUpdate(ctx);
 			return;
 		}
-		await callTelegram("editMessageText", { chat_id: chatId, message_id: state.messageId, text: truncated });
-		state.mode = "message";
-		state.lastSentText = truncated;
+		this.clearReconnectTimer();
+		await ensureBrokerProcess();
+		await this.openSocket(ctx);
 	}
 
-	function schedulePreviewFlush(chatId: number): void {
-		if (!previewState || previewState.flushTimer) return;
-		previewState.flushTimer = setTimeout(() => {
-			void flushPreview(chatId);
-		}, PREVIEW_THROTTLE_MS);
+	close(): void {
+		this.clearReconnectTimer();
+		this.socket?.destroy();
+		this.socket = undefined;
+		this.connected = false;
 	}
 
-	async function finalizePreview(chatId: number): Promise<boolean> {
-		const state = previewState;
-		if (!state) return false;
-		await flushPreview(chatId);
-		const finalText = (state.pendingText.trim() || state.lastSentText).trim();
-		if (!finalText) {
-			await clearPreview(chatId);
-			return false;
+	sendSessionUpdate(ctx: ExtensionContext): void {
+		if (!this.connected) return;
+		let snapshot: Omit<ClientToBroker & { type: "hello" }, "v" | "type" | "brokerSecret">;
+		try {
+			snapshot = this.getSnapshot(ctx);
+		} catch (error) {
+			if (isStaleContextError(error)) {
+				this.close();
+				return;
+			}
+			throw error;
 		}
-		if (state.mode === "draft") {
-			await callTelegram<TelegramSentMessage>("sendMessage", { chat_id: chatId, text: finalText });
-			await clearPreview(chatId);
-			return true;
-		}
-		previewState = undefined;
-		return state.messageId !== undefined;
+		this.send({ v: 1, type: "session_update", ...snapshot });
 	}
 
-	async function sendTextReply(chatId: number, _replyToMessageId: number, text: string): Promise<number | undefined> {
-		const chunks = chunkParagraphs(text);
-		let lastMessageId: number | undefined;
-		for (const chunk of chunks) {
-			const sent = await callTelegram<TelegramSentMessage>("sendMessage", {
-				chat_id: chatId,
-				text: chunk,
+	send(message: ClientToBroker): void {
+		if (!this.socket?.writable) return;
+		this.socket.write(`${JSON.stringify(message)}\n`);
+	}
+
+	async request<T = unknown>(message: ClientToBroker & { id: string }, timeoutMs = 8000): Promise<T> {
+		if (!this.socket?.writable) throw new Error("Telegram broker is not connected");
+		return new Promise<T>((resolve, reject) => {
+			const timer = setTimeout(() => {
+				this.requests.delete(message.id);
+				reject(new Error("Telegram broker request timed out"));
+			}, timeoutMs);
+			this.requests.set(message.id, {
+				resolve: (value) => {
+					clearTimeout(timer);
+					resolve(value as T);
+				},
+				reject: (error) => {
+					clearTimeout(timer);
+					reject(error);
+				},
 			});
-			lastMessageId = sent.message_id;
+			this.send(message);
+		});
+	}
+
+	private async openSocket(ctx: ExtensionContext): Promise<void> {
+		const secret = this.getSecret();
+		if (!secret) throw new Error("Telegram broker secret is missing");
+		await new Promise<void>((resolve, reject) => {
+			const socket = createConnection(BROKER_SOCKET_PATH);
+			let settled = false;
+			const fail = (error: Error): void => {
+				if (settled) return;
+				settled = true;
+				socket.destroy();
+				reject(error);
+			};
+			socket.setEncoding("utf8");
+			socket.once("connect", () => {
+				if (settled) return;
+				let snapshot: Omit<ClientToBroker & { type: "hello" }, "v" | "type" | "brokerSecret">;
+				try {
+					snapshot = this.getSnapshot(ctx);
+				} catch (error) {
+					fail(error instanceof Error ? error : new Error(String(error)));
+					return;
+				}
+				settled = true;
+				this.socket = socket;
+				this.connected = true;
+				this.lastError = undefined;
+				this.installSocketHandlers(socket, ctx);
+				this.send({ v: 1, type: "hello", brokerSecret: secret, ...snapshot });
+				this.updateStatus(ctx);
+				resolve();
+			});
+			socket.once("error", fail);
+		});
+	}
+
+	private installSocketHandlers(socket: Socket, ctx: ExtensionContext): void {
+		socket.on("data", (chunk) => {
+			this.buffer += chunk;
+			let index: number;
+			while ((index = this.buffer.indexOf("\n")) !== -1) {
+				const line = this.buffer.slice(0, index).trim();
+				this.buffer = this.buffer.slice(index + 1);
+				if (!line) continue;
+				try {
+					void this.handleMessage(JSON.parse(line) as BrokerToClient, ctx).catch((error) => {
+						if (isStaleContextError(error)) {
+							this.close();
+							return;
+						}
+						this.lastError = error instanceof Error ? error.message : String(error);
+						this.updateStatus(ctx, this.lastError);
+					});
+				} catch (error) {
+					if (isStaleContextError(error)) {
+						this.close();
+						return;
+					}
+					this.lastError = error instanceof Error ? error.message : String(error);
+					this.updateStatus(ctx, this.lastError);
+				}
+			}
+		});
+		socket.on("close", () => {
+			this.connected = false;
+			this.socket = undefined;
+			this.rejectAllRequests(new Error("Telegram broker unavailable"));
+			this.updateStatus(ctx);
+			this.scheduleReconnect(ctx);
+		});
+		socket.on("error", (error) => {
+			this.lastError = error.message;
+			this.updateStatus(ctx, error.message);
+		});
+	}
+
+	private async handleMessage(message: BrokerToClient, ctx: ExtensionContext): Promise<void> {
+		if (message.type === "hello_ack") {
+			this.paired = message.paired;
+			this.updateStatus(ctx);
+			return;
 		}
-		return lastMessageId;
+		if (message.type === "response") {
+			const request = this.requests.get(message.id);
+			if (!request) return;
+			this.requests.delete(message.id);
+			if (message.ok) {
+				request.resolve(message.result);
+			} else {
+				request.reject(new Error(message.error || "Telegram broker request failed"));
+			}
+			return;
+		}
+		if (message.type === "deliver_turn") {
+			await this.onDeliverTurn(message, ctx);
+		}
 	}
 
-	function getProgressChatId(): number | undefined {
-		return activeTelegramTurn?.chatId ?? config.allowedUserId;
+	private scheduleReconnect(ctx: ExtensionContext): void {
+		if (this.reconnectTimer) return;
+		this.reconnectTimer = setTimeout(() => {
+			this.reconnectTimer = undefined;
+			void this.connect(ctx).catch((error) => {
+				if (isStaleContextError(error)) return;
+				this.lastError = error instanceof Error ? error.message : String(error);
+				this.updateStatus(ctx, this.lastError);
+				this.scheduleReconnect(ctx);
+			});
+		}, 5000);
 	}
 
-	function getProgressUnavailableReason(): string | undefined {
-		if (!config.botToken) return "Telegram bot token is not configured";
-		if (!pollingPromise) return "Telegram bridge is not connected";
-		if (!config.allowedUserId) return "Telegram bridge is not paired";
-		return undefined;
+	private clearReconnectTimer(): void {
+		if (!this.reconnectTimer) return;
+		clearTimeout(this.reconnectTimer);
+		this.reconnectTimer = undefined;
 	}
 
-	function clampProgressText(text: string): string {
-		const normalized = text.trim().replace(/\s+/g, " ");
-		return normalized.length > TELEGRAM_PROGRESS_MAX_LENGTH ? normalized.slice(0, TELEGRAM_PROGRESS_MAX_LENGTH).trimEnd() : normalized;
+	private rejectAllRequests(error: Error): void {
+		for (const request of this.requests.values()) {
+			request.reject(error);
+		}
+		this.requests.clear();
+	}
+}
+
+async function canConnectToBroker(): Promise<boolean> {
+	return new Promise((resolve) => {
+		const socket = createConnection(BROKER_SOCKET_PATH);
+		const done = (value: boolean): void => {
+			socket.destroy();
+			resolve(value);
+		};
+		socket.once("connect", () => done(true));
+		socket.once("error", () => done(false));
+	});
+}
+
+async function ensureBrokerProcess(): Promise<void> {
+	await ensureTelegramDir();
+	if (await canConnectToBroker()) return;
+	const daemonPath = fileURLToPath(new URL("./daemon.mjs", import.meta.url));
+	const child = spawn(process.execPath, [daemonPath], {
+		cwd: dirname(daemonPath),
+		detached: true,
+		stdio: "ignore",
+	});
+	child.unref();
+	for (let i = 0; i < 20; i++) {
+		await new Promise((resolve) => setTimeout(resolve, 150));
+		if (await canConnectToBroker()) return;
+	}
+	throw new Error("Telegram broker did not start");
+}
+
+export default function (pi: ExtensionAPI) {
+	const connectionId = randomUUID();
+	let config: TelegramConfig = {};
+	let queuedTelegramTurns: PendingTelegramTurn[] = [];
+	let activeTelegramTurn: ActiveTelegramTurn | undefined;
+	let currentAbort: (() => void) | undefined;
+	let preserveQueuedTurnsAsHistory = false;
+	let setupInProgress = false;
+	let pendingLocalErrorTimer: ReturnType<typeof setTimeout> | undefined;
+	let sessionUpdateInterval: ReturnType<typeof setInterval> | undefined;
+
+	function updateStatus(ctx: ExtensionContext, _error?: string): void {
+		try {
+			ctx.ui.setStatus("telegram", undefined);
+		} catch (error) {
+			if (isStaleContextError(error)) return;
+			throw error;
+		}
 	}
 
-	async function sendTelegramProgress(text: string): Promise<TelegramProgressSendResult> {
+	function sendUserMessageSafely(content: Array<TextContent | ImageContent>): void {
+		try {
+			pi.sendUserMessage(content, { deliverAs: "followUp" });
+		} catch (error) {
+			if (isStaleContextError(error)) return;
+			throw error;
+		}
+	}
+
+	function countQueuedByChat(): Record<string, number> {
+		const counts: Record<string, number> = {};
+		for (const turn of queuedTelegramTurns) {
+			counts[String(turn.chatId)] = (counts[String(turn.chatId)] ?? 0) + 1;
+		}
+		return counts;
+	}
+
+	function buildRecentSessionMessages(ctx: ExtensionContext): SessionSnippet[] {
+		const snippets: SessionSnippet[] = [];
+		const entries = ctx.sessionManager.getEntries();
+		for (let i = entries.length - 1; i >= 0 && snippets.length < SESSION_HISTORY_LIMIT; i--) {
+			const entry = entries[i] as unknown as Record<string, unknown>;
+			if (entry.type !== "message") continue;
+			const message = entry.message as Record<string, unknown> | undefined;
+			if (!message || typeof message.role !== "string") continue;
+			if (message.role !== "user" && message.role !== "assistant") continue;
+			const text = getTextFromContent(message.content).replace(/\s+/g, " ").trim();
+			if (!text) continue;
+			snippets.push({ role: message.role, text: text.length > SESSION_HISTORY_TEXT_LIMIT ? `${text.slice(0, SESSION_HISTORY_TEXT_LIMIT).trimEnd()}…` : text });
+		}
+		return snippets.reverse();
+	}
+
+	function getTextFromContent(content: unknown): string {
+		if (typeof content === "string") return content;
+		if (!Array.isArray(content)) return "";
+		return content
+			.filter((block): block is { type: string; text?: string } => typeof block === "object" && block !== null && "type" in block)
+			.filter((block) => block.type === "text" && typeof block.text === "string")
+			.map((block) => block.text as string)
+			.join("");
+	}
+
+	function buildSessionSnapshot(ctx: ExtensionContext): Omit<ClientToBroker & { type: "hello" }, "v" | "type" | "brokerSecret"> {
+		return {
+			connectionId,
+			sessionId: ctx.sessionManager.getSessionId(),
+			pid: process.pid,
+			cwd: ctx.cwd,
+			sessionFile: ctx.sessionManager.getSessionFile(),
+			sessionName: ctx.sessionManager.getSessionName(),
+			model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+			isIdle: ctx.isIdle(),
+			activeTurn: activeTelegramTurn ? { requestId: activeTelegramTurn.requestId, chatId: activeTelegramTurn.chatId } : undefined,
+			queuedTurns: queuedTelegramTurns.length,
+			queuedByChat: countQueuedByChat(),
+			recentMessages: buildRecentSessionMessages(ctx),
+		};
+	}
+
+	async function sendBrokerText(chatId: number, text: string): Promise<void> {
+		if (!broker.connected) return;
+		await broker.request({ v: 1, type: "send_text", id: randomUUID(), chatId, text, linkToSession: true }).catch(() => undefined);
+	}
+
+	async function sendTelegramProgress(text: string, ctx: ExtensionContext): Promise<TelegramProgressSendResult> {
 		const message = clampProgressText(text);
 		if (!message) return { sent: false, reason: "Progress message is empty" };
-
-		const unavailableReason = getProgressUnavailableReason();
-		if (unavailableReason) return { sent: false, message, reason: unavailableReason };
-
-		const chatId = getProgressChatId();
-		if (chatId === undefined) return { sent: false, message, reason: "Telegram progress chat is unknown" };
-
+		if (!broker.connected) {
+			config = await ensureBrokerSecret(await readConfig());
+			if (config.botToken) {
+				await broker.connect(ctx).catch(() => undefined);
+				startSessionUpdates(ctx);
+				broker.sendSessionUpdate(ctx);
+			}
+		}
+		if (!broker.connected) return { sent: false, message, reason: "Telegram broker is not connected" };
 		try {
-			await sendTextReply(chatId, 0, message);
+			const result = await broker.request<TelegramProgressSendResult>({ v: 1, type: "send_progress", id: randomUUID(), text: message });
+			return result;
 		} catch (error) {
-			const reason = error instanceof Error ? error.message : String(error);
-			return { sent: false, message, reason };
+			return { sent: false, message, reason: error instanceof Error ? error.message : String(error) };
+		}
+	}
+
+	async function handleSessionStatusCommand(chatId: number, ctx: ExtensionContext): Promise<void> {
+		let totalInput = 0;
+		let totalOutput = 0;
+		let totalCacheRead = 0;
+		let totalCacheWrite = 0;
+		let totalCost = 0;
+
+		for (const entry of ctx.sessionManager.getEntries()) {
+			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+			totalInput += entry.message.usage.input;
+			totalOutput += entry.message.usage.output;
+			totalCacheRead += entry.message.usage.cacheRead;
+			totalCacheWrite += entry.message.usage.cacheWrite;
+			totalCost += entry.message.usage.cost.total;
 		}
 
-		return { sent: true, message };
+		const usage = ctx.getContextUsage();
+		const lines: string[] = [];
+		if (ctx.model) lines.push(`Model: ${ctx.model.provider}/${ctx.model.id}`);
+		const tokenParts: string[] = [];
+		if (totalInput) tokenParts.push(`↑${formatTokens(totalInput)}`);
+		if (totalOutput) tokenParts.push(`↓${formatTokens(totalOutput)}`);
+		if (totalCacheRead) tokenParts.push(`R${formatTokens(totalCacheRead)}`);
+		if (totalCacheWrite) tokenParts.push(`W${formatTokens(totalCacheWrite)}`);
+		if (tokenParts.length > 0) lines.push(`Usage: ${tokenParts.join(" ")}`);
+		const usingSubscription = ctx.model ? ctx.modelRegistry.isUsingOAuth(ctx.model) : false;
+		if (totalCost || usingSubscription) lines.push(`Cost: $${totalCost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`);
+		if (usage) {
+			const contextWindow = usage.contextWindow ?? ctx.model?.contextWindow ?? 0;
+			const percent = usage.percent !== null ? `${usage.percent.toFixed(1)}%` : "?";
+			lines.push(`Context: ${percent}/${formatTokens(contextWindow)}`);
+		} else {
+			lines.push("Context: unknown");
+		}
+		if (lines.length === 0) lines.push("No usage data yet.");
+		await sendBrokerText(chatId, lines.join("\n"));
+	}
+
+	async function dispatchBrokerTurn(delivery: Extract<BrokerToClient, { type: "deliver_turn" }>, ctx: ExtensionContext): Promise<void> {
+		const rawText = delivery.rawText.trim();
+		const lower = rawText.toLowerCase();
+
+		if (lower === "stop" || lower === "/stop") {
+			if (currentAbort) {
+				if (queuedTelegramTurns.length > 0) preserveQueuedTurnsAsHistory = true;
+				currentAbort();
+				updateStatus(ctx);
+				broker.sendSessionUpdate(ctx);
+				await sendBrokerText(delivery.chatId, "Aborted current turn.");
+			} else {
+				await sendBrokerText(delivery.chatId, "No active turn.");
+			}
+			return;
+		}
+
+		if (lower === "/compact") {
+			if (!ctx.isIdle()) {
+				await sendBrokerText(delivery.chatId, "Cannot compact while pi is busy. Send \"stop\" first.");
+				return;
+			}
+			ctx.compact({
+				onComplete: () => {
+					void sendBrokerText(delivery.chatId, "Compaction completed.");
+				},
+				onError: (error) => {
+					void sendBrokerText(delivery.chatId, `Compaction failed: ${error instanceof Error ? error.message : String(error)}`);
+				},
+			});
+			await sendBrokerText(delivery.chatId, "Compaction started.");
+			return;
+		}
+
+		if (lower === "/status") {
+			await handleSessionStatusCommand(delivery.chatId, ctx);
+			return;
+		}
+
+		const historyTurns = preserveQueuedTurnsAsHistory ? queuedTelegramTurns.splice(0) : [];
+		preserveQueuedTurnsAsHistory = false;
+		const turn = await createTelegramTurn(delivery, historyTurns);
+		queuedTelegramTurns.push(turn);
+		broker.sendSessionUpdate(ctx);
+		if (ctx.isIdle()) {
+			updateStatus(ctx);
+			sendUserMessageSafely(turn.content);
+		}
 	}
 
 	function clearPendingLocalErrorNotification(): void {
@@ -782,140 +671,12 @@ export default function (pi: ExtensionAPI) {
 		pendingLocalErrorTimer = undefined;
 	}
 
-	function formatLocalErrorNotification(errorMessage: string): string {
-		const normalized = errorMessage.trim().replace(/\s+/g, " ");
-		const clipped =
-			normalized.length > TELEGRAM_ERROR_MAX_LENGTH ? `${normalized.slice(0, TELEGRAM_ERROR_MAX_LENGTH).trimEnd()}…` : normalized;
-		return `Pi stopped with an error:\n${clipped || "Unknown error"}\n\nReply with what I should do next.`;
-	}
-
 	function scheduleLocalErrorNotification(errorMessage: string): void {
 		clearPendingLocalErrorNotification();
 		pendingLocalErrorTimer = setTimeout(() => {
 			pendingLocalErrorTimer = undefined;
-			const chatId = getProgressChatId();
-			if (getProgressUnavailableReason() || chatId === undefined) return;
-			void sendTextReply(chatId, 0, formatLocalErrorNotification(errorMessage)).catch(() => undefined);
+			broker.send({ v: 1, type: "local_error", errorMessage });
 		}, TELEGRAM_ERROR_NOTIFY_DELAY_MS);
-	}
-
-	async function sendQueuedAttachments(turn: ActiveTelegramTurn): Promise<void> {
-		for (const attachment of turn.queuedAttachments) {
-			try {
-				const mediaType = guessMediaType(attachment.path);
-				const method = mediaType ? "sendPhoto" : "sendDocument";
-				const fieldName = mediaType ? "photo" : "document";
-				await callTelegramMultipart<TelegramSentMessage>(
-					method,
-					{
-						chat_id: String(turn.chatId),
-					},
-					fieldName,
-					attachment.path,
-					attachment.fileName,
-				);
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				await sendTextReply(turn.chatId, turn.replyToMessageId, `Failed to send attachment ${attachment.fileName}: ${message}`);
-			}
-		}
-	}
-
-	function extractAssistantText(messages: AgentMessage[]): { text?: string; stopReason?: string; errorMessage?: string } {
-		for (let i = messages.length - 1; i >= 0; i--) {
-			const message = messages[i] as unknown as Record<string, unknown>;
-			if (message.role !== "assistant") continue;
-			const stopReason = typeof message.stopReason === "string" ? message.stopReason : undefined;
-			const errorMessage = typeof message.errorMessage === "string" ? message.errorMessage : undefined;
-			const content = Array.isArray(message.content) ? message.content : [];
-			const text = content
-				.filter((block): block is { type: string; text?: string } => typeof block === "object" && block !== null && "type" in block)
-				.filter((block) => block.type === "text" && typeof block.text === "string")
-				.map((block) => block.text as string)
-				.join("")
-				.trim();
-			return { text: text || undefined, stopReason, errorMessage };
-		}
-		return {};
-	}
-
-	function collectTelegramFileInfos(messages: TelegramMessage[]): TelegramFileInfo[] {
-		const files: TelegramFileInfo[] = [];
-		for (const message of messages) {
-			if (Array.isArray(message.photo) && message.photo.length > 0) {
-				const photo = [...message.photo].sort((a, b) => (a.file_size ?? 0) - (b.file_size ?? 0)).pop();
-				if (photo) {
-					files.push({
-						file_id: photo.file_id,
-						fileName: `photo-${message.message_id}.jpg`,
-						mimeType: "image/jpeg",
-						isImage: true,
-					});
-				}
-			}
-			if (message.document) {
-				const fileName = message.document.file_name || `document-${message.message_id}${guessExtensionFromMime(message.document.mime_type, "")}`;
-				files.push({
-					file_id: message.document.file_id,
-					fileName,
-					mimeType: message.document.mime_type,
-					isImage: isImageMimeType(message.document.mime_type),
-				});
-			}
-			if (message.video) {
-				const fileName = message.video.file_name || `video-${message.message_id}${guessExtensionFromMime(message.video.mime_type, ".mp4")}`;
-				files.push({
-					file_id: message.video.file_id,
-					fileName,
-					mimeType: message.video.mime_type,
-					isImage: false,
-				});
-			}
-			if (message.audio) {
-				const fileName = message.audio.file_name || `audio-${message.message_id}${guessExtensionFromMime(message.audio.mime_type, ".mp3")}`;
-				files.push({
-					file_id: message.audio.file_id,
-					fileName,
-					mimeType: message.audio.mime_type,
-					isImage: false,
-				});
-			}
-			if (message.voice) {
-				files.push({
-					file_id: message.voice.file_id,
-					fileName: `voice-${message.message_id}${guessExtensionFromMime(message.voice.mime_type, ".ogg")}`,
-					mimeType: message.voice.mime_type,
-					isImage: false,
-				});
-			}
-			if (message.animation) {
-				const fileName = message.animation.file_name || `animation-${message.message_id}${guessExtensionFromMime(message.animation.mime_type, ".mp4")}`;
-				files.push({
-					file_id: message.animation.file_id,
-					fileName,
-					mimeType: message.animation.mime_type,
-					isImage: false,
-				});
-			}
-			if (message.sticker) {
-				files.push({
-					file_id: message.sticker.file_id,
-					fileName: `sticker-${message.message_id}.webp`,
-					mimeType: "image/webp",
-					isImage: true,
-				});
-			}
-		}
-		return files;
-	}
-
-	async function buildTelegramFiles(messages: TelegramMessage[]): Promise<DownloadedTelegramFile[]> {
-		const downloaded: DownloadedTelegramFile[] = [];
-		for (const file of collectTelegramFileInfos(messages)) {
-			const path = await downloadTelegramFile(file.file_id, file.fileName);
-			downloaded.push({ path, fileName: file.fileName, isImage: file.isImage, mimeType: file.mimeType });
-		}
-		return downloaded;
 	}
 
 	async function promptForConfig(ctx: ExtensionContext): Promise<void> {
@@ -925,7 +686,7 @@ export default function (pi: ExtensionAPI) {
 			const token = await ctx.ui.input("Telegram bot token", "123456:ABCDEF...");
 			if (!token) return;
 
-			const nextConfig: TelegramConfig = { ...config, botToken: token.trim() };
+			const nextConfig: TelegramConfig = await ensureBrokerSecret({ ...config, botToken: token.trim() });
 			const response = await fetch(`https://api.telegram.org/bot${nextConfig.botToken}/getMe`);
 			const data = (await response.json()) as TelegramApiResponse<TelegramUser>;
 			if (!data.ok || !data.result) {
@@ -937,303 +698,59 @@ export default function (pi: ExtensionAPI) {
 			nextConfig.botUsername = data.result.username;
 			config = nextConfig;
 			await writeConfig(config);
-			ctx.ui.notify(`Telegram bot connected: @${config.botUsername ?? "unknown"}`, "info");
+			ctx.ui.notify(`Telegram bot configured: @${config.botUsername ?? "unknown"}`, "info");
 			ctx.ui.notify("Send /start to your bot in Telegram to pair this extension with your account.", "info");
-			await startPolling(ctx);
+			await broker.connect(ctx);
+			await broker.request({ v: 1, type: "reload_config", id: randomUUID() }).catch(() => undefined);
 			updateStatus(ctx);
 		} finally {
 			setupInProgress = false;
 		}
 	}
 
-	async function stopPolling(options: { releaseOwner?: boolean } = {}): Promise<void> {
-		stopTypingLoop();
-		stopOwnerHeartbeat();
-		pollingController?.abort();
-		pollingController = undefined;
-		await pollingPromise?.catch(() => undefined);
-		pollingPromise = undefined;
-		if (options.releaseOwner !== false) {
-			await releaseOwnerLease();
-		}
-	}
-
-	function formatTelegramHistoryText(rawText: string, files: DownloadedTelegramFile[]): string {
-		let summary = rawText.length > 0 ? rawText : "(no text)";
-		if (files.length > 0) {
-			summary += `\nAttachments:`;
-			for (const file of files) {
-				summary += `\n- ${file.path}`;
-			}
-		}
-		return summary;
-	}
-
-	async function createTelegramTurn(
-		messages: TelegramMessage[],
-		historyTurns: PendingTelegramTurn[] = [],
-	): Promise<PendingTelegramTurn> {
-		const firstMessage = messages[0];
-		if (!firstMessage) throw new Error("Missing Telegram message for turn creation");
-		const rawText = messages.map((message) => (message.text || message.caption || "").trim()).filter(Boolean).join("\n\n");
-		const files = await buildTelegramFiles(messages);
-		const content: Array<TextContent | ImageContent> = [];
-		let prompt = `${TELEGRAM_PREFIX}`;
-
-		if (historyTurns.length > 0) {
-			prompt += `\n\nEarlier Telegram messages arrived after an aborted turn. Treat them as prior user messages, in order:`;
-			for (const [index, turn] of historyTurns.entries()) {
-				prompt += `\n\n${index + 1}. ${turn.historyText}`;
-			}
-			prompt += `\n\nCurrent Telegram message:`;
-		}
-
-		if (rawText.length > 0) {
-			prompt += historyTurns.length > 0 ? `\n${rawText}` : ` ${rawText}`;
-		}
-		if (files.length > 0) {
-			prompt += `\n\nTelegram attachments were saved locally:`;
-			for (const file of files) {
-				prompt += `\n- ${file.path}`;
-			}
-		}
-		content.push({ type: "text", text: prompt });
-
-		for (const file of files) {
-			if (!file.isImage) continue;
-			const mediaType = file.mimeType || guessMediaType(file.path);
-			if (!mediaType) continue;
-			const buffer = await readFile(file.path);
-			content.push({
-				type: "image",
-				data: buffer.toString("base64"),
-				mimeType: mediaType,
-			});
-		}
-
-		return {
-			chatId: firstMessage.chat.id,
-			replyToMessageId: firstMessage.message_id,
-			queuedAttachments: [],
-			content,
-			historyText: formatTelegramHistoryText(rawText, files),
-		};
-	}
-
-	async function dispatchAuthorizedTelegramMessages(messages: TelegramMessage[], ctx: ExtensionContext): Promise<void> {
-		const firstMessage = messages[0];
-		if (!firstMessage) return;
-		const rawText = messages.map((message) => (message.text || message.caption || "").trim()).find((text) => text.length > 0) || "";
-		const lower = rawText.toLowerCase();
-
-		if (lower === "stop" || lower === "/stop") {
-			if (currentAbort) {
-				if (queuedTelegramTurns.length > 0) {
-					preserveQueuedTurnsAsHistory = true;
-				}
-				currentAbort();
-				updateStatus(ctx);
-				await sendTextReply(firstMessage.chat.id, firstMessage.message_id, "Aborted current turn.");
-			} else {
-				await sendTextReply(firstMessage.chat.id, firstMessage.message_id, "No active turn.");
-			}
-			return;
-		}
-
-		if (lower === "/compact") {
-			if (!ctx.isIdle()) {
-				await sendTextReply(firstMessage.chat.id, firstMessage.message_id, "Cannot compact while pi is busy. Send \"stop\" first.");
-				return;
-			}
-			ctx.compact({
-				onComplete: () => {
-					void sendTextReply(firstMessage.chat.id, firstMessage.message_id, "Compaction completed.");
-				},
-				onError: (error) => {
-					const message = error instanceof Error ? error.message : String(error);
-					void sendTextReply(firstMessage.chat.id, firstMessage.message_id, `Compaction failed: ${message}`);
-				},
-			});
-			await sendTextReply(firstMessage.chat.id, firstMessage.message_id, "Compaction started.");
-			return;
-		}
-
-		if (lower === "/status") {
-			let totalInput = 0;
-			let totalOutput = 0;
-			let totalCacheRead = 0;
-			let totalCacheWrite = 0;
-			let totalCost = 0;
-
-			for (const entry of ctx.sessionManager.getEntries()) {
-				if (entry.type !== "message" || entry.message.role !== "assistant") continue;
-				totalInput += entry.message.usage.input;
-				totalOutput += entry.message.usage.output;
-				totalCacheRead += entry.message.usage.cacheRead;
-				totalCacheWrite += entry.message.usage.cacheWrite;
-				totalCost += entry.message.usage.cost.total;
-			}
-
-			const usage = ctx.getContextUsage();
-			const lines: string[] = [];
-			if (ctx.model) {
-				lines.push(`Model: ${ctx.model.provider}/${ctx.model.id}`);
-			}
-			const tokenParts: string[] = [];
-			if (totalInput) tokenParts.push(`↑${formatTokens(totalInput)}`);
-			if (totalOutput) tokenParts.push(`↓${formatTokens(totalOutput)}`);
-			if (totalCacheRead) tokenParts.push(`R${formatTokens(totalCacheRead)}`);
-			if (totalCacheWrite) tokenParts.push(`W${formatTokens(totalCacheWrite)}`);
-			if (tokenParts.length > 0) {
-				lines.push(`Usage: ${tokenParts.join(" ")}`);
-			}
-			const usingSubscription = ctx.model ? ctx.modelRegistry.isUsingOAuth(ctx.model) : false;
-			if (totalCost || usingSubscription) {
-				lines.push(`Cost: $${totalCost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`);
-			}
-			if (usage) {
-				const contextWindow = usage.contextWindow ?? ctx.model?.contextWindow ?? 0;
-				const percent = usage.percent !== null ? `${usage.percent.toFixed(1)}%` : "?";
-				lines.push(`Context: ${percent}/${formatTokens(contextWindow)}`);
-			} else {
-				lines.push("Context: unknown");
-			}
-			if (lines.length === 0) {
-				lines.push("No usage data yet.");
-			}
-			await sendTextReply(firstMessage.chat.id, firstMessage.message_id, lines.join("\n"));
-			return;
-		}
-
-		if (lower === "/help" || lower === "/start") {
-			await sendTextReply(
-				firstMessage.chat.id,
-				firstMessage.message_id,
-				`Send me a message and I will forward it to pi. Commands: /status, /compact, stop.`,
-			);
-			if (config.allowedUserId === undefined && firstMessage.from) {
-				config.allowedUserId = firstMessage.from.id;
-				await writeConfig(config);
-				updateStatus(ctx);
-			}
-			return;
-		}
-
-		const historyTurns = preserveQueuedTurnsAsHistory ? queuedTelegramTurns.splice(0) : [];
-		preserveQueuedTurnsAsHistory = false;
-		const turn = await createTelegramTurn(messages, historyTurns);
-		queuedTelegramTurns.push(turn);
-		if (ctx.isIdle()) {
-			startTypingLoop(ctx, turn.chatId);
-			updateStatus(ctx);
-			sendUserMessageSafely(turn.content);
-		}
-	}
-
-	async function handleAuthorizedTelegramMessage(message: TelegramMessage, ctx: ExtensionContext): Promise<void> {
-		if (message.media_group_id) {
-			const key = `${message.chat.id}:${message.media_group_id}`;
-			const existing = mediaGroups.get(key) ?? { messages: [] };
-			existing.messages.push(message);
-			if (existing.flushTimer) clearTimeout(existing.flushTimer);
-			existing.flushTimer = setTimeout(() => {
-				const state = mediaGroups.get(key);
-				mediaGroups.delete(key);
-				if (!state) return;
-				void dispatchAuthorizedTelegramMessages(state.messages, ctx).catch((error) => {
-					if (isStaleContextError(error)) return;
-					const message = error instanceof Error ? error.message : String(error);
-					updateStatus(ctx, message);
-				});
-			}, TELEGRAM_MEDIA_GROUP_DEBOUNCE_MS);
-			mediaGroups.set(key, existing);
-			return;
-		}
-
-		await dispatchAuthorizedTelegramMessages([message], ctx);
-	}
-
-	async function handleUpdate(update: TelegramUpdate, ctx: ExtensionContext): Promise<void> {
-		const message = update.message || update.edited_message;
-		if (!message || message.chat.type !== "private" || !message.from || message.from.is_bot) return;
-
-		if (config.allowedUserId === undefined) {
-			config.allowedUserId = message.from.id;
-			await writeConfig(config);
-			updateStatus(ctx);
-			await sendTextReply(message.chat.id, message.message_id, "Telegram bridge paired with this account.");
-		}
-
-		if (message.from.id !== config.allowedUserId) {
-			await sendTextReply(message.chat.id, message.message_id, "This bot is not authorized for your account.");
-			return;
-		}
-
-		await handleAuthorizedTelegramMessage(message, ctx);
-	}
-
-	async function pollLoop(ctx: ExtensionContext, signal: AbortSignal): Promise<void> {
-		if (!config.botToken) return;
-
-		try {
-			await callTelegram("deleteWebhook", { drop_pending_updates: false }, { signal });
-		} catch {
-			// ignore
-		}
-
-		if (config.lastUpdateId === undefined) {
+	function startSessionUpdates(ctx: ExtensionContext): void {
+		if (sessionUpdateInterval) return;
+		sessionUpdateInterval = setInterval(() => {
 			try {
-				const updates = await callTelegram<TelegramUpdate[]>("getUpdates", { offset: -1, limit: 1, timeout: 0 }, { signal });
-				const last = updates.at(-1);
-				if (last) {
-					config.lastUpdateId = last.update_id;
-					await writeConfig(config);
-				}
-			} catch {
-				// ignore
-			}
-		}
-
-		while (!signal.aborted) {
-			try {
-				const updates = await callTelegram<TelegramUpdate[]>(
-					"getUpdates",
-					{
-						offset: config.lastUpdateId !== undefined ? config.lastUpdateId + 1 : undefined,
-						limit: 10,
-						timeout: 30,
-						allowed_updates: ["message", "edited_message"],
-					},
-					{ signal },
-				);
-				for (const update of updates) {
-					config.lastUpdateId = update.update_id;
-					await writeConfig(config);
-					await handleUpdate(update, ctx);
-				}
+				broker.sendSessionUpdate(ctx);
 			} catch (error) {
-				if (signal.aborted) return;
-				if (isStaleContextError(error)) return;
-				if (error instanceof DOMException && error.name === "AbortError") return;
-				const message = error instanceof Error ? error.message : String(error);
-				updateStatus(ctx, message);
-				await new Promise((resolve) => setTimeout(resolve, 3000));
-				updateStatus(ctx);
+				if (isStaleContextError(error)) stopSessionUpdates();
 			}
-		}
+		}, SESSION_UPDATE_INTERVAL_MS);
 	}
 
-	async function startPolling(ctx: ExtensionContext, options: { forceOwner?: boolean } = {}): Promise<void> {
-		if (!config.botToken || pollingPromise) return;
-		if (!(await claimOwnerLease(ctx, { force: options.forceOwner }))) return;
-		pollingController = new AbortController();
-		pollingPromise = pollLoop(ctx, pollingController.signal).finally(() => {
-			pollingPromise = undefined;
-			pollingController = undefined;
-			updateStatus(ctx);
-		});
-		updateStatus(ctx);
+	function stopSessionUpdates(): void {
+		if (!sessionUpdateInterval) return;
+		clearInterval(sessionUpdateInterval);
+		sessionUpdateInterval = undefined;
 	}
+
+	function slugify(value: string | undefined, fallback: string): string {
+		const slug = value
+			?.toLowerCase()
+			.replace(/[^a-z0-9._-]+/g, "-")
+			.replace(/^-+|-+$/g, "")
+			.slice(0, 32);
+		return slug || fallback;
+	}
+
+	function formatStatusSession(session: BrokerStatus["sessions"][number]): string {
+		const cwdName = basename(session.cwd || "?");
+		const fallbackSlug = session.sessionId ? session.sessionId.slice(0, 8) : "session";
+		const sessionSlug = slugify(session.sessionName, fallbackSlug);
+		const state = session.isIdle ? "idle" : "busy";
+		const queued = session.queuedTurns ? `, ${session.queuedTurns} queued` : "";
+		const model = session.model ? ` · ${session.model}` : "";
+		return `- [${cwdName}:${sessionSlug}] pid ${session.pid} · ${state}${queued}${model}`;
+	}
+
+	const broker = new BrokerClient(
+		connectionId,
+		() => config.brokerSecret,
+		buildSessionSnapshot,
+		dispatchBrokerTurn,
+		updateStatus,
+	);
 
 	pi.registerTool({
 		name: "telegram_attach",
@@ -1247,15 +764,11 @@ export default function (pi: ExtensionAPI) {
 			paths: Type.Array(Type.String({ description: "Local file path to attach" }), { minItems: 1, maxItems: MAX_ATTACHMENTS_PER_TURN }),
 		}),
 		async execute(_toolCallId, params) {
-			if (!activeTelegramTurn) {
-				throw new Error("telegram_attach can only be used while replying to an active Telegram turn");
-			}
+			if (!activeTelegramTurn) throw new Error("telegram_attach can only be used while replying to an active Telegram turn");
 			const added: string[] = [];
 			for (const inputPath of params.paths) {
 				const stats = await stat(inputPath);
-				if (!stats.isFile()) {
-					throw new Error(`Not a file: ${inputPath}`);
-				}
+				if (!stats.isFile()) throw new Error(`Not a file: ${inputPath}`);
 				if (activeTelegramTurn.queuedAttachments.length >= MAX_ATTACHMENTS_PER_TURN) {
 					throw new Error(`Attachment limit reached (${MAX_ATTACHMENTS_PER_TURN})`);
 				}
@@ -1282,8 +795,8 @@ export default function (pi: ExtensionAPI) {
 		parameters: Type.Object({
 			message: Type.String({ description: "Brief progress update to send", minLength: 1, maxLength: TELEGRAM_PROGRESS_MAX_LENGTH }),
 		}),
-		async execute(_toolCallId, params) {
-			const result = await sendTelegramProgress(params.message);
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const result = await sendTelegramProgress(params.message, ctx);
 			return {
 				content: [
 					{
@@ -1306,92 +819,64 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("telegram-status", {
 		description: "Show Telegram bridge status",
 		handler: async (_args, ctx) => {
-			const currentOwner = await readOwnerLease();
-			const ownerStatus = currentOwner
-				? `${currentOwner.id === ownerId ? "this session" : formatOwnerLease(currentOwner)}${isOwnerLeaseActive(currentOwner) ? "" : " (stale)"}`
-				: "none";
-			const status = [
-				`bot: ${config.botUsername ? `@${config.botUsername}` : "not configured"}`,
-				`allowed user: ${config.allowedUserId ?? "not paired"}`,
-				`polling: ${pollingPromise ? "running" : "stopped"}`,
-				`owner: ${ownerStatus}`,
-				`progress target: ${getProgressChatId() !== undefined ? "known" : "unknown"}`,
-				`config: ${CONFIG_PATH}`,
-				`active telegram turn: ${activeTelegramTurn ? "yes" : "no"}`,
-				`queued telegram turns: ${queuedTelegramTurns.length}`,
+			config = await ensureBrokerSecret(await readConfig());
+			if (config.botToken && !broker.connected) {
+				await broker.connect(ctx).catch(() => undefined);
+				startSessionUpdates(ctx);
+			}
+			broker.sendSessionUpdate(ctx);
+			let brokerStatus: BrokerStatus | undefined;
+			if (broker.connected) {
+				brokerStatus = await broker.request<BrokerStatus>({ v: 1, type: "get_status", id: randomUUID() }).catch(() => undefined);
+			}
+			const lines = [
+				ctx.ui.theme.fg("accent", "Telegram bridge"),
+				`Bot: ${config.botUsername ? `@${config.botUsername}` : "not configured"}`,
+				`Allowed user: ${brokerStatus?.allowedUserId ?? config.allowedUserId ?? "not paired"}`,
+				`Broker: ${broker.connected ? `running${brokerStatus ? ` (pid ${brokerStatus.brokerPid})` : ""}` : "stopped"}`,
+				`Polling: ${brokerStatus?.polling ? "running" : "stopped"}`,
+				`This session: ${broker.connected ? "registered" : "not registered"}`,
+				`Config: ${CONFIG_PATH}`,
+				`Active Telegram turn: ${activeTelegramTurn ? "yes" : "no"}`,
+				`Queued Telegram turns: ${queuedTelegramTurns.length}`,
 			];
-			ctx.ui.notify(status.join(" | "), "info");
-		},
-	});
-
-	pi.registerCommand("telegram-connect", {
-		description: "Start the Telegram bridge in this pi session",
-		handler: async (_args, ctx) => {
-			config = await readConfig();
-			if (!config.botToken) {
-				await promptForConfig(ctx);
-				return;
+			if (brokerStatus?.lastError) lines.push(`Last error: ${brokerStatus.lastError}`);
+			lines.push("", `Connected sessions: ${brokerStatus?.sessions.length ?? (broker.connected ? "unknown" : 0)}`);
+			if (brokerStatus?.sessions.length) {
+				lines.push(...brokerStatus.sessions.map(formatStatusSession));
 			}
-			await startPolling(ctx);
-			updateStatus(ctx);
-		},
-	});
-
-	pi.registerCommand("telegram-takeover", {
-		description: "Move Telegram bridge ownership to this pi session",
-		handler: async (_args, ctx) => {
-			config = await readConfig();
-			if (!config.botToken) {
-				await promptForConfig(ctx);
-				return;
-			}
-			if (pollingPromise) {
-				ctx.ui.notify("Telegram bridge is already connected in this session.", "info");
-				return;
-			}
-			await startPolling(ctx, { forceOwner: true });
-			updateStatus(ctx);
-		},
-	});
-
-	pi.registerCommand("telegram-disconnect", {
-		description: "Stop the Telegram bridge in this pi session",
-		handler: async (_args, ctx) => {
-			await stopPolling();
-			updateStatus(ctx);
+			ctx.ui.notify(lines.join("\n"), brokerStatus?.lastError ? "warning" : "info");
 		},
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
-		config = await readConfig();
+		config = await ensureBrokerSecret(await readConfig());
 		await mkdir(TEMP_DIR, { recursive: true });
-		await refreshOwnerConflict();
+		try {
+			await broker.connect(ctx);
+			startSessionUpdates(ctx);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			updateStatus(ctx, message);
+		}
 		updateStatus(ctx);
 	});
 
-	pi.on("session_shutdown", async (_event, _ctx) => {
+	pi.on("session_shutdown", async () => {
 		queuedTelegramTurns = [];
-		for (const state of mediaGroups.values()) {
-			if (state.flushTimer) clearTimeout(state.flushTimer);
-		}
-		mediaGroups.clear();
 		clearPendingLocalErrorNotification();
-		if (activeTelegramTurn) {
-			await clearPreview(activeTelegramTurn.chatId);
-		}
 		activeTelegramTurn = undefined;
 		currentAbort = undefined;
 		preserveQueuedTurnsAsHistory = false;
-		await stopPolling();
+		stopSessionUpdates();
+		broker.close();
 	});
 
 	pi.on("before_agent_start", async (event) => {
 		const progressGuidance = isTelegramPrompt(event.prompt)
 			? "- The current user message came from Telegram. Do not call telegram_progress unless the user explicitly asks; Telegram-originated turns already stream previews."
 			: "- When the Telegram bridge is connected and this session was started locally, use telegram_progress for meaningful milestones, blockers, or long-running work. Keep updates short and avoid secrets, raw command output, or repetitive status.";
-		return {
-			systemPrompt: `${event.systemPrompt}${SYSTEM_PROMPT_SUFFIX}\n${progressGuidance}`,
-		};
+		return { systemPrompt: `${event.systemPrompt}${SYSTEM_PROMPT_SUFFIX}\n${progressGuidance}` };
 	});
 
 	pi.on("agent_start", async (_event, ctx) => {
@@ -1408,35 +893,33 @@ export default function (pi: ExtensionAPI) {
 			const nextTurn = queuedTelegramTurns.shift();
 			if (nextTurn) {
 				activeTelegramTurn = { ...nextTurn };
-				previewState = { mode: draftSupport === "unsupported" ? "message" : "draft", pendingText: "", lastSentText: "" };
-				startTypingLoop(ctx);
+				broker.send({ v: 1, type: "preview_start", requestId: nextTurn.requestId, chatId: nextTurn.chatId });
 			}
 		}
+		broker.sendSessionUpdate(ctx);
 		updateStatus(ctx);
 	});
 
 	pi.on("message_start", async (event, _ctx) => {
-		if (!activeTelegramTurn || !isAssistantMessage(event.message)) return;
-		if (previewState && (previewState.pendingText.trim().length > 0 || previewState.lastSentText.trim().length > 0)) {
-			await finalizePreview(activeTelegramTurn.chatId);
-		}
-		previewState = { mode: draftSupport === "unsupported" ? "message" : "draft", pendingText: "", lastSentText: "" };
+		if (!activeTelegramTurn || !isAssistantMessage(event.message as TelegramPreviewTextMessage)) return;
+		broker.send({ v: 1, type: "preview_start", requestId: activeTelegramTurn.requestId, chatId: activeTelegramTurn.chatId });
 	});
 
 	pi.on("message_update", async (event, _ctx) => {
-		if (!activeTelegramTurn || !isAssistantMessage(event.message)) return;
-		if (!previewState) {
-			previewState = { mode: draftSupport === "unsupported" ? "message" : "draft", pendingText: "", lastSentText: "" };
-		}
-		previewState.pendingText = getMessageText(event.message);
-		schedulePreviewFlush(activeTelegramTurn.chatId);
+		if (!activeTelegramTurn || !isAssistantMessage(event.message as TelegramPreviewTextMessage)) return;
+		broker.send({
+			v: 1,
+			type: "preview_update",
+			requestId: activeTelegramTurn.requestId,
+			chatId: activeTelegramTurn.chatId,
+			text: getMessageText(event.message),
+		});
 	});
 
 	pi.on("agent_end", async (event, ctx) => {
 		const turn = activeTelegramTurn;
 		const assistant = extractAssistantText(event.messages);
 		currentAbort = undefined;
-		stopTypingLoop();
 		activeTelegramTurn = undefined;
 		updateStatus(ctx);
 		if (!turn) {
@@ -1445,45 +928,29 @@ export default function (pi: ExtensionAPI) {
 			} else {
 				clearPendingLocalErrorNotification();
 			}
-			return;
-		}
-
-		if (assistant.stopReason === "aborted") {
-			await clearPreview(turn.chatId);
-			return;
-		}
-		if (assistant.stopReason === "error") {
-			await clearPreview(turn.chatId);
-			await sendTextReply(turn.chatId, turn.replyToMessageId, assistant.errorMessage || "Telegram bridge: pi failed while processing the request.");
-			return;
-		}
-
-		const finalText = assistant.text;
-		if (previewState) {
-			previewState.pendingText = finalText ?? previewState.pendingText;
-		}
-
-		if (finalText && finalText.length <= MAX_MESSAGE_LENGTH) {
-			const finalized = await finalizePreview(turn.chatId);
-			if (!finalized && turn.queuedAttachments.length > 0 && !finalText) {
-				await sendTextReply(turn.chatId, turn.replyToMessageId, "Attached requested file(s).");
+			if (queuedTelegramTurns.length > 0) {
+				sendUserMessageSafely(queuedTelegramTurns[0].content);
 			}
-		} else {
-			await clearPreview(turn.chatId);
-			if (finalText) {
-				await sendTextReply(turn.chatId, turn.replyToMessageId, finalText);
-			} else if (turn.queuedAttachments.length > 0) {
-				await sendTextReply(turn.chatId, turn.replyToMessageId, "Attached requested file(s).");
-			}
+			broker.sendSessionUpdate(ctx);
+			return;
 		}
 
-		await sendQueuedAttachments(turn);
+		broker.send({
+			v: 1,
+			type: "turn_result",
+			requestId: turn.requestId,
+			chatId: turn.chatId,
+			replyToMessageId: turn.replyToMessageId,
+			stopReason: assistant.stopReason,
+			text: assistant.text,
+			errorMessage: assistant.errorMessage,
+			attachments: turn.queuedAttachments,
+		});
 
 		if (queuedTelegramTurns.length > 0 && !preserveQueuedTurnsAsHistory) {
-			const nextTurn = queuedTelegramTurns[0];
-			startTypingLoop(ctx, nextTurn.chatId);
 			updateStatus(ctx);
-			sendUserMessageSafely(nextTurn.content);
+			sendUserMessageSafely(queuedTelegramTurns[0].content);
 		}
+		broker.sendSessionUpdate(ctx);
 	});
 }
