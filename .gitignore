@@ -8,3 +8,8 @@ dist/
 .DS_Store
 .pi/plans/
 .pi/demos/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
