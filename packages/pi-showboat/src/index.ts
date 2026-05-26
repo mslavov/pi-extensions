@@ -5,7 +5,7 @@ import * as showboat from "./showboat-cli.js";
 
 const ACTIONS = ["status", "init", "note", "exec", "image", "pop", "verify", "extract"] as const;
 const MUTATING_ACTIONS = new Set<ShowboatAction>(["init", "note", "exec", "image", "pop"]);
-const WORK_TOOL_NAMES = new Set(["bash", "edit", "write", "Agent", "todo_write"]);
+const WORK_TOOL_NAMES = new Set(["bash", "edit", "write", "Agent"]);
 const MUTATION_TOOL_NAMES = new Set(["edit", "write"]);
 const SHOWCASE_PROMPT_PATTERN = /\b(showboat|demo|showcase|demonstrat(?:e|ion))\b/i;
 const COMPLEX_WORK_PROMPT_PATTERN = /\b(implement|fix|debug|investigat(?:e|ion)|build|feature|bug|refactor|repair|plan|failing|failure|error|issue)\b/i;
@@ -236,12 +236,13 @@ function shouldRequestShowcase(messages: unknown[]): boolean {
 	const toolCount = countToolResults(messages);
 	const hasMutation = [...toolNames].some((name) => MUTATION_TOOL_NAMES.has(name));
 	const hasWorkTool = [...toolNames].some((name) => WORK_TOOL_NAMES.has(name));
+	const hasBeadsCli = hasBeadsCliActivity(messages);
 
-	if (SHOWCASE_PROMPT_PATTERN.test(userText)) return hasWorkTool;
+	if (SHOWCASE_PROMPT_PATTERN.test(userText)) return hasWorkTool || hasBeadsCli;
 	if (SIMPLE_CHANGE_PATTERN.test(userText) && toolCount < 3 && !toolNames.has("bash")) return false;
-	if (COMPLEX_WORK_PROMPT_PATTERN.test(userText)) return hasWorkTool;
-	if (hasMutation && (toolNames.has("bash") || toolNames.has("todo_write") || toolNames.has("Agent") || toolCount >= 3)) return true;
-	return GENERAL_WORK_PROMPT_PATTERN.test(userText) && toolNames.has("bash");
+	if (COMPLEX_WORK_PROMPT_PATTERN.test(userText)) return hasWorkTool || hasBeadsCli;
+	if (hasMutation && (toolNames.has("bash") || hasBeadsCli || toolNames.has("Agent") || toolCount >= 3)) return true;
+	return GENERAL_WORK_PROMPT_PATTERN.test(userText) && (toolNames.has("bash") || hasBeadsCli);
 }
 
 function showboatDemoWasCreated(messages: unknown[]): boolean {
@@ -258,6 +259,15 @@ function collectToolNames(messages: unknown[]): Set<string> {
 		if (msg.role === "toolResult" && typeof msg.toolName === "string") names.add(msg.toolName);
 	}
 	return names;
+}
+
+function hasBeadsCliActivity(messages: unknown[]): boolean {
+	return messages.some((message) => {
+		const msg = message as { role?: unknown; toolName?: unknown; content?: unknown; details?: unknown };
+		if (msg.role !== "toolResult" || msg.toolName !== "bash") return false;
+		const haystack = `${textFromContent(msg.content)}\n${JSON.stringify(msg.details ?? {})}`;
+		return /\bbd\s+(?:status|ready|list|show|create|update|close|link|dep|graph)\b/.test(haystack);
+	});
 }
 
 function countToolResults(messages: unknown[]): number {

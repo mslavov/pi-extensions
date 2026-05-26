@@ -14,7 +14,7 @@ import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { matchesKey, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { AgentManager } from "./agent-manager.js";
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
@@ -436,11 +436,46 @@ export default function (pi: ExtensionAPI) {
 
   // --- Cross-extension RPC via pi.events ---
   let currentCtx: ExtensionContext | undefined;
+  let terminalInputUnsubscribe: (() => void) | undefined;
+  let mainAbortCleanup: (() => void) | undefined;
+  let mainAbortSignal: AbortSignal | undefined;
+
+  function clearMainAbortSignal(): void {
+    mainAbortCleanup?.();
+    mainAbortCleanup = undefined;
+    mainAbortSignal = undefined;
+  }
+
+  function watchMainAbortSignal(ctx: ExtensionContext): void {
+    const signal = ctx.signal;
+    if (!signal || signal === mainAbortSignal) return;
+
+    clearMainAbortSignal();
+    const onAbort = () => {
+      stopAllSubagents();
+      clearMainAbortSignal();
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    mainAbortSignal = signal;
+    mainAbortCleanup = () => signal.removeEventListener("abort", onAbort);
+    if (signal.aborted) onAbort();
+  }
 
   // Capture ctx from session_start for RPC spawn handler
   pi.on("session_start", async (_event, ctx) => {
     currentCtx = ctx;
     manager.clearCompleted();           // preserve existing behavior
+    terminalInputUnsubscribe?.();
+    terminalInputUnsubscribe = ctx.hasUI
+      ? ctx.ui.onTerminalInput((data) => {
+          if (!matchesKey(data, "escape")) return undefined;
+          const stopped = stopAllSubagents();
+          if (stopped > 0) {
+            ctx.ui.notify(`Stopped ${stopped} subagent${stopped === 1 ? "" : "s"}.`, "info");
+          }
+          return undefined;
+        })
+      : undefined;
   });
 
   const { unsubPing: unsubPingRpc, unsubSpawn: unsubSpawnRpc, unsubStop: unsubStopRpc } = registerRpcHandlers({
@@ -456,6 +491,9 @@ export default function (pi: ExtensionAPI) {
   // On shutdown, abort all agents immediately and clean up.
   // If the session is going down, there's nothing left to consume agent results.
   pi.on("session_shutdown", async () => {
+    terminalInputUnsubscribe?.();
+    terminalInputUnsubscribe = undefined;
+    clearMainAbortSignal();
     unsubSpawnRpc();
     unsubStopRpc();
     unsubPingRpc();
@@ -483,6 +521,37 @@ export default function (pi: ExtensionAPI) {
   let currentBatchAgents: { id: string; joinMode: JoinMode }[] = [];
   let batchFinalizeTimer: ReturnType<typeof setTimeout> | undefined;
   let batchCounter = 0;
+
+  function isStoppable(record: AgentRecord): boolean {
+    return record.status === "running" || record.status === "queued";
+  }
+
+  function markStopped(record: AgentRecord): void {
+    record.resultConsumed = true;
+    cancelNudge(record.id);
+    currentBatchAgents = currentBatchAgents.filter(a => a.id !== record.id);
+    agentActivity.delete(record.id);
+    widget.markFinished(record.id);
+  }
+
+  function stopSubagent(id: string): boolean {
+    const record = manager.getRecord(id);
+    if (!record || !isStoppable(record)) return false;
+    const stopped = manager.abort(id);
+    if (!stopped) return false;
+    markStopped(record);
+    widget.update();
+    return true;
+  }
+
+  function stopAllSubagents(): number {
+    const ids = manager.listAgents().filter(isStoppable).map(record => record.id);
+    let count = 0;
+    for (const id of ids) {
+      if (stopSubagent(id)) count++;
+    }
+    return count;
+  }
 
   /** Finalize the current batch: if 2+ smart-mode agents, register as a group. */
   function finalizeBatch() {
@@ -520,8 +589,25 @@ export default function (pi: ExtensionAPI) {
 
   // Grab UI context from first tool execution + clear lingering widget on new turn
   pi.on("tool_execution_start", async (_event, ctx) => {
+    watchMainAbortSignal(ctx);
     widget.setUICtx(ctx.ui as UICtx);
     widget.onTurnStart();
+  });
+
+  pi.on("agent_start", async (_event, ctx) => {
+    watchMainAbortSignal(ctx);
+  });
+
+  pi.on("turn_start", async (_event, ctx) => {
+    watchMainAbortSignal(ctx);
+  });
+
+  pi.on("message_start", async (_event, ctx) => {
+    watchMainAbortSignal(ctx);
+  });
+
+  pi.on("agent_end", async () => {
+    clearMainAbortSignal();
   });
 
   /** Derive a short model label from a model string. */
@@ -1367,7 +1453,10 @@ Custom agents can be defined in .pi/agents/<name>.md (project) or ~/.pi/agent/ag
 
     await ctx.ui.custom<undefined>(
       (tui, theme, _keybindings, done) => {
-        return new ConversationViewer(tui, session, record, activity, theme, done);
+        return new ConversationViewer(tui, session, record, activity, theme, done, {
+          stopAgent: stopSubagent,
+          stopAll: stopAllSubagents,
+        });
       },
       {
         overlay: true,

@@ -6,7 +6,7 @@
     "npm:pi-ask-user",
     "npm:pi-rtk-optimizer",
     "${repoPackage:pi-subagents}",
-    "${repoPackage:pi-todo-write}",
+    "${repoPackage:pi-beads}",
     "${repoPackage:pi-plan-mode}",
     "${repoPackage:pi-markitdown}",
     "${repoPackage:pi-powerline}",

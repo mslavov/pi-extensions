@@ -27,6 +27,12 @@ import {
 	type SessionSnippet,
 	type TelegramConfig,
 } from "./protocol.js";
+import {
+	LEGACY_NOTIFY_EVENT,
+	PI_NOTIFY_EVENT,
+	parsePiNotifyEvent,
+	type PiNotifyEventV1,
+} from "./notify-contract.js";
 
 interface TelegramApiResponse<T> {
 	ok: boolean;
@@ -70,6 +76,7 @@ const SYSTEM_PROMPT_SUFFIX = `
 
 Telegram bridge extension is active.
 - Messages forwarded from Telegram are prefixed with "[telegram]".
+- Some [telegram] messages are delegated by the persistent Telegram communication agent on the user's behalf.
 - [telegram] messages may include local temp file paths for Telegram attachments. Read those files as needed.
 - If a [telegram] user asked for a file or generated artifact, use the telegram_attach tool with the local file path so the extension can send it with your next final reply.
 - Do not assume mentioning a local file path in plain text will send it to Telegram. Use telegram_attach.`;
@@ -202,6 +209,11 @@ async function createTelegramTurn(
 	const files = delivery.files;
 	const content: Array<TextContent | ImageContent> = [];
 	let prompt = `${TELEGRAM_PREFIX}`;
+	const delegatedByCommunicationAgent = delivery.source === "communication_agent";
+
+	if (delegatedByCommunicationAgent) {
+		prompt += `\n\nThe Telegram communication agent delegated this user request to this pi session. Respond to the Telegram user through the normal Telegram bridge flow.`;
+	}
 
 	if (historyTurns.length > 0) {
 		prompt += `\n\nEarlier Telegram messages arrived after an aborted turn. Treat them as prior user messages, in order:`;
@@ -212,7 +224,7 @@ async function createTelegramTurn(
 	}
 
 	if (rawText.length > 0) {
-		prompt += historyTurns.length > 0 ? `\n${rawText}` : ` ${rawText}`;
+		prompt += historyTurns.length > 0 || delegatedByCommunicationAgent ? `\n${rawText}` : ` ${rawText}`;
 	}
 	if (files.length > 0) {
 		prompt += `\n\nTelegram attachments were saved locally:`;
@@ -482,6 +494,9 @@ export default function (pi: ExtensionAPI) {
 	let setupInProgress = false;
 	let pendingLocalErrorTimer: ReturnType<typeof setTimeout> | undefined;
 	let sessionUpdateInterval: ReturnType<typeof setInterval> | undefined;
+	let currentCtx: ExtensionContext | undefined;
+	const sentNotifyDedupeKeys = new Map<string, number>();
+	const waitingAskUserToolCalls = new Set<string>();
 
 	function updateStatus(ctx: ExtensionContext, _error?: string): void {
 		try {
@@ -490,6 +505,74 @@ export default function (pi: ExtensionAPI) {
 			if (isStaleContextError(error)) return;
 			throw error;
 		}
+	}
+
+	function setCurrentCtx(ctx: ExtensionContext): void {
+		currentCtx = ctx;
+	}
+
+	function isEphemeralSession(ctx: ExtensionContext): boolean {
+		return ctx.sessionManager.getSessionFile() === undefined;
+	}
+
+	function formatNotifyMessage(event: PiNotifyEventV1): string {
+		return event.title ? `${event.title}: ${event.message}` : event.message;
+	}
+
+	function redactNotificationText(text: string): string {
+		return text
+			.replace(/\b(?:sk|pk|ghp|gho|github_pat)_[A-Za-z0-9_\-]{12,}\b/g, "[redacted]")
+			.replace(/\b\d{6,}:[A-Za-z0-9_-]{20,}\b/g, "[redacted]")
+			.replace(/\b[A-Za-z0-9._%+-]+:[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\b/g, "[redacted]");
+	}
+
+	function summarizeAssistantForNotification(text: string | undefined): string {
+		if (!text) return "Turn completed";
+		const firstSentence = text.match(/^[^.!?\n]+[.!?]?/)?.[0] ?? text;
+		const summary = firstSentence.length > 120 ? `${firstSentence.slice(0, 117)}...` : firstSentence;
+		return redactNotificationText(summary.trim() || "Turn completed");
+	}
+
+	function getAskUserQuestion(args: unknown): string | undefined {
+		if (!args || typeof args !== "object") return undefined;
+		const question = (args as { question?: unknown }).question;
+		return typeof question === "string" && question.trim() ? question.trim() : undefined;
+	}
+
+	function getToolUpdateText(partialResult: unknown): string {
+		if (!partialResult || typeof partialResult !== "object") return "";
+		return getTextFromContent((partialResult as { content?: unknown }).content).trim();
+	}
+
+	function notifyDedupeKey(event: PiNotifyEventV1): string {
+		return event.dedupeKey ?? `${event.source}:${event.kind ?? "notify"}:${event.title ?? ""}:${event.message}`;
+	}
+
+	async function handleNotifyEvent(rawEvent: unknown, ctx: ExtensionContext): Promise<void> {
+		const event = parsePiNotifyEvent(rawEvent);
+		if (!event) return;
+		if (isEphemeralSession(ctx)) return;
+		if (activeTelegramTurn && event.suppressForTelegramOriginated !== false) return;
+
+		const key = notifyDedupeKey(event);
+		const now = Date.now();
+		const minIntervalMs = event.minIntervalMs ?? 30_000;
+		const previous = sentNotifyDedupeKeys.get(key);
+		if (previous !== undefined && now - previous < minIntervalMs) return;
+		if (sentNotifyDedupeKeys.size > 200) sentNotifyDedupeKeys.clear();
+		sentNotifyDedupeKeys.set(key, now);
+
+		await sendTelegramProgress(formatNotifyMessage(event), ctx);
+	}
+
+	function installNotifyListener(eventName: typeof PI_NOTIFY_EVENT | typeof LEGACY_NOTIFY_EVENT): void {
+		pi.events.on(eventName, (event) => {
+			const ctx = currentCtx;
+			if (!ctx) return;
+			void handleNotifyEvent(event, ctx).catch((error) => {
+				if (isStaleContextError(error)) return;
+			});
+		});
 	}
 
 	function sendUserMessageSafely(content: Array<TextContent | ImageContent>): void {
@@ -560,6 +643,9 @@ export default function (pi: ExtensionAPI) {
 	async function sendTelegramProgress(text: string, ctx: ExtensionContext): Promise<TelegramProgressSendResult> {
 		const message = clampProgressText(text);
 		if (!message) return { sent: false, reason: "Progress message is empty" };
+		if (isEphemeralSession(ctx)) {
+			return { sent: false, message, reason: "Telegram notifications are disabled for subagent sessions" };
+		}
 		if (!broker.connected) {
 			config = await ensureBrokerSecret(await readConfig());
 			if (config.botToken) {
@@ -734,6 +820,49 @@ export default function (pi: ExtensionAPI) {
 		return slug || fallback;
 	}
 
+	function normalizePromptText(value: string): string {
+		return value.replace(/\s+/g, " ").trim();
+	}
+
+	function hasPriorUserMessage(ctx: ExtensionContext, prompt: string): boolean {
+		const userTexts: string[] = [];
+		for (const entry of ctx.sessionManager.getEntries()) {
+			const value = entry as unknown as Record<string, unknown>;
+			if (value.type !== "message") continue;
+			const message = value.message as Record<string, unknown> | undefined;
+			if (message?.role !== "user") continue;
+			const text = normalizePromptText(getTextFromContent(message.content));
+			if (text) userTexts.push(text);
+		}
+		if (userTexts.length === 0) return false;
+		const current = normalizePromptText(prompt);
+		return userTexts.length > 1 || userTexts[userTexts.length - 1] !== current;
+	}
+
+	function sessionNameSource(prompt: string): string {
+		let text = prompt.trim().replace(/^\[telegram\]\s*/i, "");
+		const currentMessageIndex = text.lastIndexOf("Current Telegram message:");
+		if (currentMessageIndex !== -1) {
+			text = text.slice(currentMessageIndex + "Current Telegram message:".length);
+		}
+		text = text.split("Telegram attachments were saved locally:")[0] ?? text;
+		text = text
+			.replace(/The Telegram communication agent delegated this user request[^\n]*\n?/gi, " ")
+			.replace(/Earlier Telegram messages arrived after an aborted turn[^\n]*\n?/gi, " ")
+			.replace(/https?:\/\/\S+/g, " ")
+			.replace(/[>`*_#[\](){}]/g, " ");
+		return normalizePromptText(text);
+	}
+
+	function maybeNameSessionFromPrompt(prompt: string, ctx: ExtensionContext): void {
+		if (pi.getSessionName() || ctx.sessionManager.getSessionName()) return;
+		if (hasPriorUserMessage(ctx, prompt)) return;
+		const name = slugify(sessionNameSource(prompt), "");
+		if (!name) return;
+		pi.setSessionName(name);
+		broker.sendSessionUpdate(ctx);
+	}
+
 	function formatStatusSession(session: BrokerStatus["sessions"][number]): string {
 		const cwdName = basename(session.cwd || "?");
 		const fallbackSlug = session.sessionId ? session.sessionId.slice(0, 8) : "session";
@@ -751,6 +880,9 @@ export default function (pi: ExtensionAPI) {
 		dispatchBrokerTurn,
 		updateStatus,
 	);
+
+	installNotifyListener(PI_NOTIFY_EVENT);
+	installNotifyListener(LEGACY_NOTIFY_EVENT);
 
 	pi.registerTool({
 		name: "telegram_attach",
@@ -840,6 +972,13 @@ export default function (pi: ExtensionAPI) {
 				`Active Telegram turn: ${activeTelegramTurn ? "yes" : "no"}`,
 				`Queued Telegram turns: ${queuedTelegramTurns.length}`,
 			];
+			if (brokerStatus?.communicationAgent) {
+				const agent = brokerStatus.communicationAgent;
+				lines.push(`Communication agent: ${agent.isIdle ? "idle" : "busy"}, queued ${agent.pendingMessages}`);
+				if (agent.sessionFile) lines.push(`Communication session: ${agent.sessionFile}`);
+				if (agent.contextPercent !== undefined && agent.contextPercent !== null) lines.push(`Communication context: ${agent.contextPercent.toFixed(1)}%`);
+				if (agent.lastError) lines.push(`Communication error: ${agent.lastError}`);
+			}
 			if (brokerStatus?.lastError) lines.push(`Last error: ${brokerStatus.lastError}`);
 			lines.push("", `Connected sessions: ${brokerStatus?.sessions.length ?? (broker.connected ? "unknown" : 0)}`);
 			if (brokerStatus?.sessions.length) {
@@ -850,6 +989,13 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
+		setCurrentCtx(ctx);
+		sentNotifyDedupeKeys.clear();
+		waitingAskUserToolCalls.clear();
+		if (isEphemeralSession(ctx)) {
+			updateStatus(ctx);
+			return;
+		}
 		config = await ensureBrokerSecret(await readConfig());
 		await mkdir(TEMP_DIR, { recursive: true });
 		try {
@@ -867,19 +1013,53 @@ export default function (pi: ExtensionAPI) {
 		clearPendingLocalErrorNotification();
 		activeTelegramTurn = undefined;
 		currentAbort = undefined;
+		currentCtx = undefined;
+		sentNotifyDedupeKeys.clear();
+		waitingAskUserToolCalls.clear();
 		preserveQueuedTurnsAsHistory = false;
 		stopSessionUpdates();
 		broker.close();
 	});
 
-	pi.on("before_agent_start", async (event) => {
-		const progressGuidance = isTelegramPrompt(event.prompt)
+	pi.on("tool_execution_update", async (event, ctx) => {
+		setCurrentCtx(ctx);
+		if (event.toolName !== "ask_user") return;
+		if (waitingAskUserToolCalls.has(event.toolCallId)) return;
+		if (!/waiting for user input/i.test(getToolUpdateText(event.partialResult))) return;
+		waitingAskUserToolCalls.add(event.toolCallId);
+		await handleNotifyEvent(
+			{
+				v: 1,
+				source: "pi-telegram",
+				kind: "waiting",
+				level: "info",
+				title: "Input needed",
+				message: getAskUserQuestion(event.args) ?? "ask_user is waiting for your input.",
+				dedupeKey: `ask-user:${event.toolCallId}`,
+				minIntervalMs: 60_000,
+			},
+			ctx,
+		);
+	});
+
+	pi.on("tool_execution_end", async (event, ctx) => {
+		setCurrentCtx(ctx);
+		if (event.toolName === "ask_user") waitingAskUserToolCalls.delete(event.toolCallId);
+	});
+
+	pi.on("before_agent_start", async (event, ctx) => {
+		setCurrentCtx(ctx);
+		maybeNameSessionFromPrompt(event.prompt, ctx);
+		const progressGuidance = isEphemeralSession(ctx)
+			? "- Telegram notifications are disabled in subagent sessions. Do not call telegram_progress."
+			: isTelegramPrompt(event.prompt)
 			? "- The current user message came from Telegram. Do not call telegram_progress unless the user explicitly asks; Telegram-originated turns already stream previews."
 			: "- When the Telegram bridge is connected and this session was started locally, use telegram_progress for meaningful milestones, blockers, or long-running work. Keep updates short and avoid secrets, raw command output, or repetitive status.";
 		return { systemPrompt: `${event.systemPrompt}${SYSTEM_PROMPT_SUFFIX}\n${progressGuidance}` };
 	});
 
 	pi.on("agent_start", async (_event, ctx) => {
+		setCurrentCtx(ctx);
 		currentAbort = () => {
 			try {
 				ctx.abort();
@@ -917,14 +1097,34 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("agent_end", async (event, ctx) => {
+		setCurrentCtx(ctx);
 		const turn = activeTelegramTurn;
 		const assistant = extractAssistantText(event.messages);
 		currentAbort = undefined;
 		activeTelegramTurn = undefined;
 		updateStatus(ctx);
 		if (!turn) {
+			if (isEphemeralSession(ctx)) {
+				clearPendingLocalErrorNotification();
+				return;
+			}
 			if (assistant.stopReason === "error") {
 				scheduleLocalErrorNotification(assistant.errorMessage || "Unknown error");
+			} else if (assistant.stopReason !== "aborted") {
+				clearPendingLocalErrorNotification();
+				await handleNotifyEvent(
+					{
+						v: 1,
+						source: "pi-telegram",
+						kind: "ready",
+						level: "success",
+						title: "Pi turn finished",
+						message: summarizeAssistantForNotification(assistant.text),
+						dedupeKey: `agent-end:${ctx.sessionManager.getLeafId() ?? Date.now()}`,
+						minIntervalMs: 1000,
+					},
+					ctx,
+				);
 			} else {
 				clearPendingLocalErrorNotification();
 			}

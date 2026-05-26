@@ -1,0 +1,14 @@
+id: pi-beads-command
+suite: pi-extensions
+description: Verify the /beads command from pi-beads is registered and handles missing databases safely.
+agents:
+  include: [pi-current]
+prompt: /beads status
+assert:
+  - type: settingsDrivenSetup
+  - type: exitCode
+    equals: 0
+  - type: notContains
+    value: '"type":"agent_start"'
+  - type: workspaceDiff
+    changedFiles: []

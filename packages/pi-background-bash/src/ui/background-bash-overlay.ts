@@ -104,6 +104,11 @@ export class BackgroundBashOverlay {
 			void this.stopSelected();
 			return;
 		}
+
+		if (data === "k") {
+			void this.killSelected();
+			return;
+		}
 	}
 
 	private handleDetailInput(data: string): void {
@@ -154,6 +159,11 @@ export class BackgroundBashOverlay {
 			void this.stopSelected();
 			return;
 		}
+
+		if (data === "k") {
+			void this.killSelected();
+			return;
+		}
 	}
 
 	private renderList(): string[] {
@@ -166,7 +176,7 @@ export class BackgroundBashOverlay {
 			th.fg("accent", th.bold("Background Bash Jobs")) +
 				"  " +
 				(runningCount > 0 ? th.fg("accent", runningLabel) : th.fg("dim", runningLabel)) +
-				th.fg("dim", "  ↑↓ select • enter/→ open • s stop • r refresh • q/esc close"),
+				th.fg("dim", "  ↑↓ select • enter/→ open • s stop • k kill • r refresh • q/esc close"),
 		);
 		if (this.loading) lines.push(th.fg("warning", "Refreshing..."));
 		if (this.message) lines.push(th.fg("muted", this.message));
@@ -201,7 +211,7 @@ export class BackgroundBashOverlay {
 			return lines;
 		}
 
-		lines.push(th.fg("accent", th.bold(current.meta.id)) + th.fg("dim", "  backspace/← jobs • ↑↓ scroll • ctrl+u/d page • g/G top/bottom • r refresh • s stop • q/esc close"));
+		lines.push(th.fg("accent", th.bold(current.meta.id)) + th.fg("dim", "  backspace/← jobs • ↑↓ scroll • ctrl+u/d page • g/G top/bottom • r refresh • s stop • k kill • q/esc close"));
 		if (this.loading) lines.push(th.fg("warning", "Refreshing..."));
 		if (this.message) lines.push(th.fg("muted", this.message));
 		lines.push("");
@@ -300,16 +310,24 @@ export class BackgroundBashOverlay {
 	}
 
 	private async stopSelected(): Promise<void> {
+		await this.signalSelected("SIGTERM", "Stopping", "Stopped");
+	}
+
+	private async killSelected(): Promise<void> {
+		await this.signalSelected("SIGKILL", "Killing", "Killed");
+	}
+
+	private async signalSelected(signal: "SIGTERM" | "SIGKILL", action: string, result: string): Promise<void> {
 		const current = this.jobs[this.selected];
 		if (!current) return;
 		this.loading = true;
-		this.message = `Stopping ${current.meta.id}...`;
+		this.message = `${action} ${current.meta.id}...`;
 		this.requestRender();
 		try {
-			await this.manager.stop(this.cwd, current.meta.id, "SIGTERM");
+			await this.manager.stop(this.cwd, current.meta.id, signal);
 			await this.refresh();
 			if (this.view === "detail") await this.refreshLog(false, true);
-			this.message = `Stopped ${current.meta.id}`;
+			this.message = `${result} ${current.meta.id}`;
 		} catch (error) {
 			this.message = error instanceof Error ? error.message : String(error);
 		} finally {

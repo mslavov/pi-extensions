@@ -16,12 +16,18 @@ import { type AgentActivity, describeActivity, formatDuration, formatTokens, get
 const CHROME_LINES = 6;
 const MIN_VIEWPORT = 3;
 
+interface ConversationViewerActions {
+  stopAgent?: (id: string) => boolean;
+  stopAll?: () => number;
+}
+
 export class ConversationViewer implements Component {
   private scrollOffset = 0;
   private autoScroll = true;
   private unsubscribe: (() => void) | undefined;
   private lastInnerW = 0;
   private closed = false;
+  private statusMessage = "";
 
   constructor(
     private tui: TUI,
@@ -30,6 +36,7 @@ export class ConversationViewer implements Component {
     private activity: AgentActivity | undefined,
     private theme: Theme,
     private done: (result: undefined) => void,
+    private actions: ConversationViewerActions = {},
   ) {
     this.unsubscribe = session.subscribe(() => {
       if (this.closed) return;
@@ -38,9 +45,21 @@ export class ConversationViewer implements Component {
   }
 
   handleInput(data: string): void {
-    if (matchesKey(data, "escape") || matchesKey(data, "q")) {
+    if (matchesKey(data, "escape")) {
+      this.actions.stopAll?.();
       this.closed = true;
       this.done(undefined);
+      return;
+    }
+
+    if (matchesKey(data, "q")) {
+      this.closed = true;
+      this.done(undefined);
+      return;
+    }
+
+    if (matchesKey(data, "s")) {
+      this.stopCurrentAgent();
       return;
     }
 
@@ -137,7 +156,9 @@ export class ConversationViewer implements Component {
       ? "100%"
       : `${Math.round(((visibleStart + viewportHeight) / contentLines.length) * 100)}%`;
     const footerLeft = th.fg("dim", `${contentLines.length} lines · ${scrollPct}`);
-    const footerRight = th.fg("dim", "↑↓ scroll · PgUp/PgDn · Esc close");
+    const footerRight = th.fg("dim", this.canStop()
+      ? "↑↓ scroll · PgUp/PgDn · s stop · q close · Esc stop"
+      : "↑↓ scroll · PgUp/PgDn · q/Esc close");
     const footerGap = Math.max(1, innerW - visibleWidth(footerLeft) - visibleWidth(footerRight));
     lines.push(row(footerLeft + " ".repeat(footerGap) + footerRight));
     lines.push(hrBot);
@@ -161,12 +182,33 @@ export class ConversationViewer implements Component {
     return Math.max(MIN_VIEWPORT, this.tui.terminal.rows - CHROME_LINES);
   }
 
+  private canStop(): boolean {
+    return this.record.status === "running" || this.record.status === "queued";
+  }
+
+  private stopCurrentAgent(): void {
+    if (!this.canStop()) {
+      this.statusMessage = `Agent is ${this.record.status}.`;
+      this.tui.requestRender();
+      return;
+    }
+
+    const stopped = this.actions.stopAgent?.(this.record.id) ?? false;
+    this.statusMessage = stopped ? `Stopped agent ${this.record.id}.` : `Agent is ${this.record.status}.`;
+    this.tui.requestRender();
+  }
+
   private buildContentLines(width: number): string[] {
     if (width <= 0) return [];
 
     const th = this.theme;
     const messages = this.session.messages;
     const lines: string[] = [];
+
+    if (this.statusMessage) {
+      lines.push(th.fg("warning", this.statusMessage));
+      lines.push("");
+    }
 
     if (messages.length === 0) {
       lines.push(th.fg("dim", "(waiting for first message...)"));

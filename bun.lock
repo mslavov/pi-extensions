@@ -40,6 +40,18 @@
         "typebox": "*",
       },
     },
+    "packages/pi-beads": {
+      "name": "pi-beads",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@types/node": "*",
+        "typescript": "^6.0.2",
+      },
+      "peerDependencies": {
+        "@earendil-works/pi-coding-agent": "*",
+        "@earendil-works/pi-tui": "*",
+      },
+    },
     "packages/pi-claude-code": {
       "name": "pi-claude-code",
       "version": "0.1.0",
@@ -943,6 +955,8 @@
     "pi-autocomplete": ["pi-autocomplete@workspace:packages/pi-autocomplete"],
 
     "pi-background-bash": ["pi-background-bash@workspace:packages/pi-background-bash"],
+
+    "pi-beads": ["pi-beads@workspace:packages/pi-beads"],
 
     "pi-claude-code": ["pi-claude-code@workspace:packages/pi-claude-code"],
 

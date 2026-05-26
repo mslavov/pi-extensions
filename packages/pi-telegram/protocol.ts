@@ -51,6 +51,17 @@ export interface BrokerStatus {
 	brokerPid: number;
 	lastUpdateId?: number;
 	sessions: BrokerSessionSnapshot[];
+	communicationAgent?: {
+		enabled: boolean;
+		sessionId?: string;
+		sessionFile?: string;
+		isIdle: boolean;
+		activeTurn?: { requestId: string; chatId: number };
+		pendingMessages: number;
+		lastError?: string;
+		lastHandledAt?: number;
+		contextPercent?: number | null;
+	};
 	lastError?: string;
 }
 
@@ -88,6 +99,8 @@ export type BrokerToClient =
 			rawText: string;
 			telegramMessageIds: number[];
 			files: DownloadedTelegramFile[];
+			source?: "telegram_user" | "communication_agent";
+			delegatedByRequestId?: string;
 		}
 	| { v: 1; type: "response"; id: string; ok: boolean; result?: unknown; error?: string };
 

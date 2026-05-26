@@ -304,7 +304,7 @@ export default function backgroundBashExtension(pi: ExtensionAPI): void {
 		handler: async (_args, ctx) => openOverlay(ctx),
 	});
 
-	pi.registerShortcut(Key.ctrlShift("b"), {
+	pi.registerShortcut(Key.ctrlShift("j"), {
 		description: "View background bash jobs and logs",
 		handler: openOverlay,
 	});

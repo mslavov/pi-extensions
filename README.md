@@ -13,11 +13,12 @@ Remote: `git@github.com:mslavov/pi-extensions.git`
 | [pi-context](packages/pi-context/) | Displays current pi context window usage with `/context` |
 | [pi-headroom](packages/pi-headroom/) | Transparent LLM context compression using Headroom |
 | [pi-markitdown](packages/pi-markitdown/) | Reads PDFs, Office files, images, and other non-text files as Markdown via MarkItDown |
-| [pi-plan-mode](packages/pi-plan-mode/) | Structured planning via scout/planner subagents with task tracking |
+| [pi-plan-mode](packages/pi-plan-mode/) | Structured planning via scout/planner subagents with Beads task graphs |
 | [pi-powerline](packages/pi-powerline/) | Configurable Powerline-style footer for pi |
 | [pi-prompt-history](packages/pi-prompt-history/) | Ctrl+R prompt history picker across projects, project, or session |
 | [pi-progressive-context](packages/pi-progressive-context/) | Lazy nested AGENTS.md / CLAUDE.md context loading for pi |
 | [pi-subagents](packages/pi-subagents/) | Patched fork of `@tintinweb/pi-subagents` for autonomous sub-agents in pi |
+| [pi-beads](packages/pi-beads/) | Display current-project Beads task status in the TUI |
 | [pi-todo-write](packages/pi-todo-write/) | TodoWrite tool for structured task list management in coding sessions |
 
 ## Setup
@@ -53,7 +54,7 @@ Or add local packages to `~/.pi/agent/settings.json`:
     "../../workspace/pi-extensions/packages/pi-claude-code",
     "../../workspace/pi-extensions/packages/pi-context",
     "../../workspace/pi-extensions/packages/pi-headroom",
-    "../../workspace/pi-extensions/packages/pi-todo-write",
+    "../../workspace/pi-extensions/packages/pi-beads",
     "../../workspace/pi-extensions/packages/pi-plan-mode",
     "../../workspace/pi-extensions/packages/pi-powerline",
     "../../workspace/pi-extensions/packages/pi-prompt-history",

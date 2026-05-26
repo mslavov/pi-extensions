@@ -14,7 +14,9 @@ import {
 	ModelRegistry,
 	SessionManager,
 	SettingsManager,
+	defineTool,
 } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 
 const TELEGRAM_DIR = join(homedir(), ".pi", "agent", "extensions", "telegram");
 const OLD_CONFIG_PATH = join(homedir(), ".pi", "agent", "telegram.json");
@@ -24,20 +26,20 @@ const BROKER_SOCKET_PATH = join(TELEGRAM_DIR, "broker.sock");
 const BROKER_STATE_PATH = join(TELEGRAM_DIR, "broker-state.json");
 const BROKER_STATUS_PATH = join(TELEGRAM_DIR, "broker.json");
 const BROKER_LOG_PATH = join(TELEGRAM_DIR, "broker.log");
+const COMMUNICATION_AGENT_SESSION_DIR = join(TELEGRAM_DIR, "communication-agent");
 const MAX_MESSAGE_LENGTH = 4096;
 const PREVIEW_THROTTLE_MS = 750;
 const TELEGRAM_DRAFT_ID_MAX = 2_147_483_647;
 const TELEGRAM_MEDIA_GROUP_DEBOUNCE_MS = 1200;
 const TELEGRAM_PROGRESS_MAX_LENGTH = 500;
-const ROUTER_CONFIDENCE_THRESHOLD = 0.75;
 const TELEGRAM_HISTORY_LIMIT = 50;
 const ROUTE_DECISION_LIMIT = 50;
 const MESSAGE_ROUTE_LIMIT = 500;
 const SESSION_STALE_MS = 30_000;
 const SESSION_SWEEP_MS = 10_000;
-const ROUTER_TEXT_LIMIT = 1000;
+const COMMUNICATION_TEXT_LIMIT = 1000;
 const SESSION_SNIPPET_LIMIT = 12;
-const PENDING_CHOICE_TTL_MS = 10 * 60 * 1000;
+const COMMUNICATION_AGENT_TOOL_NAMES = ["telegram_get_status", "telegram_send_to_session", "telegram_control_session"];
 
 let config = {};
 let state = {
@@ -54,9 +56,17 @@ let draftSupport = "unknown";
 let nextDraftId = 0;
 
 const sessions = new Map();
-const pendingChoices = new Map();
 const mediaGroups = new Map();
 const previews = new Map();
+let communicationAgent;
+let communicationAgentReady;
+let communicationActiveTurn;
+let communicationCurrentText = "";
+let communicationQueue = [];
+let communicationProcessing = false;
+let communicationLastError;
+let communicationLastHandledAt;
+let pendingTranscriptEntries = [];
 
 function now() {
 	return Date.now();
@@ -168,7 +178,23 @@ function buildStatus() {
 		brokerPid: process.pid,
 		lastUpdateId: state.lastUpdateId,
 		sessions: [...sessions.values()].map((session) => publicSession(session)),
+		communicationAgent: communicationAgentStatus(),
 		lastError,
+	};
+}
+
+function communicationAgentStatus() {
+	const session = communicationAgent?.session;
+	return {
+		enabled: true,
+		sessionId: session?.sessionId,
+		sessionFile: session?.sessionFile,
+		isIdle: !communicationProcessing && !session?.isStreaming,
+		activeTurn: communicationActiveTurn ? { requestId: communicationActiveTurn.requestId, chatId: communicationActiveTurn.chatId } : undefined,
+		pendingMessages: communicationQueue.length,
+		lastError: communicationLastError,
+		lastHandledAt: communicationLastHandledAt,
+		contextPercent: null,
 	};
 }
 
@@ -350,6 +376,9 @@ async function sendTextReply(chatId, text, sessionId) {
 		messageIds.push(sent.message_id);
 		if (sessionId) linkTelegramMessage(chatId, sent.message_id, sessionId, body);
 	}
+	if (sessionId && messageIds.length > 0) {
+		await recordCommunicationTranscript({ direction: "out", source: "pi-session", chatId, messageIds, sessionId, text });
+	}
 	await writeState();
 	return messageIds;
 }
@@ -428,9 +457,15 @@ async function finalizePreview(requestId, finalText) {
 		const body = formatSessionText(text, preview.sessionId);
 		const sent = await callTelegram("sendMessage", { chat_id: preview.chatId, text: body });
 		linkTelegramMessage(preview.chatId, sent.message_id, preview.sessionId, body);
+		if (preview.sessionId) {
+			await recordCommunicationTranscript({ direction: "out", source: "pi-session", chatId: preview.chatId, messageIds: [sent.message_id], sessionId: preview.sessionId, text });
+		}
 		await clearPreview(requestId);
 		await writeState();
 		return true;
+	}
+	if (preview.sessionId && preview.messageId !== undefined) {
+		await recordCommunicationTranscript({ direction: "out", source: "pi-session", chatId: preview.chatId, messageIds: [preview.messageId], sessionId: preview.sessionId, text });
 	}
 	previews.delete(requestId);
 	return preview.messageId !== undefined;
@@ -453,6 +488,17 @@ async function sendQueuedAttachments(chatId, attachments, sessionId) {
 				attachment.fileName,
 			);
 			linkTelegramMessage(chatId, sent.message_id, sessionId, caption ? `${caption} ${attachment.fileName}` : attachment.fileName);
+			if (sessionId) {
+				await recordCommunicationTranscript({
+					direction: "out",
+					source: "pi-session",
+					chatId,
+					messageIds: [sent.message_id],
+					sessionId,
+					text: `Sent attachment: ${attachment.fileName}`,
+					attachments: [{ fileName: attachment.fileName, path: attachment.path }],
+				});
+			}
 		} catch (error) {
 			await sendTextReply(chatId, `Failed to send attachment ${attachment.fileName}: ${errorMessage(error)}`, sessionId);
 		}
@@ -549,15 +595,12 @@ function rawTextForMessages(messages) {
 	return messages.map((message) => (message.text || message.caption || "").trim()).filter(Boolean).join("\n\n");
 }
 
-function fileSummaries(messages) {
-	return collectTelegramFileInfos(messages).map((file) => ({ fileName: file.fileName, mimeType: file.mimeType, isImage: file.isImage }));
-}
-
 function messageRouteKey(chatId, messageId) {
 	return `${chatId}:${messageId}`;
 }
 
 function linkTelegramMessage(chatId, messageId, sessionId, summary) {
+	if (!sessionId) return;
 	state.messageRoutes[messageRouteKey(chatId, messageId)] = {
 		sessionId,
 		summary: clip(summary, 300),
@@ -583,151 +626,447 @@ function addRouteDecision(decision) {
 	state.routeDecisions = state.routeDecisions.slice(-ROUTE_DECISION_LIMIT);
 }
 
-async function deliverMessagesToSession(sessionId, messages, reason) {
-	const session = sessions.get(sessionId);
-	if (!session) {
-		await askUserToChoose(messages, `Session disconnected before delivery (${sessionId}).`);
+function getConnectedSessions() {
+	return [...sessions.values()].filter((session) => session.socket.writable);
+}
+
+function communicationSessionSnapshot(session) {
+	return {
+		sessionId: session.sessionId,
+		cwd: session.cwd,
+		sessionFile: session.sessionFile,
+		sessionName: session.sessionName,
+		model: session.model,
+		isIdle: session.isIdle,
+		activeTurn: session.activeTurn,
+		queuedTurns: session.queuedTurns,
+		queuedByChat: session.queuedByChat,
+		lastSeenSecondsAgo: Math.round((now() - session.lastSeen) / 1000),
+		recentMessages: sanitizeSnippets(session.recentMessages),
+	};
+}
+
+function buildCommunicationSystemPrompt() {
+	return `You are the Telegram communication agent for pi.
+
+You handle private Telegram DMs from the paired user. Every authorized Telegram message arrives in your persistent session with structured metadata. Your job is to be the user's conversational Telegram agent, not just a router.
+
+Capabilities:
+- Answer the Telegram user directly when a request is conversational or asks about connected sessions.
+- Use telegram_get_status to inspect the broker and running pi sessions.
+- Use telegram_send_to_session to send exact user-delegated instructions to a currently connected pi session.
+- Use telegram_control_session for status, compact, and stop actions.
+
+Rules:
+- Delegate coding, repository, shell, file, browser, and long-running work to a target pi session. Do not pretend to perform coding work yourself.
+- If the message is a reply to a Telegram bot message linked to a session, strongly prefer that linked session unless the user clearly asks otherwise.
+- If only one pi session is connected, you may use it without asking when delegation is needed.
+- If the target session is ambiguous, ask the user which session to use instead of guessing.
+- When delegating, send the target session a concise, complete instruction written on the user's behalf.
+- Target sessions reply to Telegram through their own Telegram extension tools and previews; you do not need to wait for their final answer.
+- If attachments are present and the user asks to analyze or transform them, delegate to a pi session and include current attachments.
+- Keep direct Telegram replies concise.`;
+}
+
+function createCommunicationTools() {
+	return [
+		defineTool({
+			name: "telegram_get_status",
+			label: "Telegram Status",
+			description: "Inspect Telegram broker status and currently connected pi sessions.",
+			parameters: Type.Object({}, { additionalProperties: false }),
+			async execute() {
+				const status = buildStatus();
+				const lines = [
+					`Connected sessions: ${status.sessions.length}`,
+					...status.sessions.map((session) => `- ${formatSessionLabel(session)}`),
+				];
+				return {
+					content: [{ type: "text", text: lines.join("\n") }],
+					details: { ok: true, status },
+				};
+			},
+		}),
+		defineTool({
+			name: "telegram_send_to_session",
+			label: "Send To pi Session",
+			description: "Send an exact user-delegated message to a currently connected pi session.",
+			parameters: Type.Object({
+				sessionId: Type.String({ description: "Target connected pi session id", minLength: 1 }),
+				text: Type.String({ description: "Exact text to deliver to the target pi session", minLength: 1 }),
+				includeCurrentAttachments: Type.Optional(Type.Boolean({ description: "Include files from the current Telegram message", default: true })),
+				reason: Type.Optional(Type.String({ description: "Short routing reason", maxLength: 200 })),
+			}),
+			async execute(_toolCallId, params) {
+				const turn = communicationActiveTurn;
+				if (!turn) {
+					return {
+						content: [{ type: "text", text: "Could not deliver: there is no active Telegram communication turn." }],
+						details: { ok: false, delivered: false, reason: "no-active-turn" },
+					};
+				}
+				try {
+					const files = params.includeCurrentAttachments === false ? [] : turn.files;
+					const delivered = await deliverTurnToSession({
+						sessionId: params.sessionId,
+						chatId: turn.chatId,
+						fromUserId: turn.fromUserId,
+						replyToMessageId: turn.replyToMessageId,
+						telegramMessageIds: turn.telegramMessageIds,
+						rawText: params.text,
+						files,
+						reason: params.reason || "communication-agent",
+						source: "communication_agent",
+						delegatedByRequestId: turn.requestId,
+					});
+					return {
+						content: [{ type: "text", text: `Delivered to ${delivered.sessionLabel}.` }],
+						details: { ok: true, delivered: true, delegatedReplyExpected: true, command: null, ...delivered },
+					};
+				} catch (error) {
+					return {
+						content: [{ type: "text", text: `Could not deliver: ${errorMessage(error)}` }],
+						details: { ok: false, delivered: false, sessionId: params.sessionId, reason: errorMessage(error) },
+					};
+				}
+			},
+		}),
+		defineTool({
+			name: "telegram_control_session",
+			label: "Control pi Session",
+			description: "Send status, compact, or stop control actions to a currently connected pi session.",
+			parameters: Type.Object({
+				sessionId: Type.String({ description: "Target connected pi session id", minLength: 1 }),
+				action: Type.Union([Type.Literal("status"), Type.Literal("compact"), Type.Literal("stop")]),
+				reason: Type.Optional(Type.String({ description: "Short routing reason", maxLength: 200 })),
+			}),
+			async execute(_toolCallId, params) {
+				const turn = communicationActiveTurn;
+				if (!turn) {
+					return {
+						content: [{ type: "text", text: "Could not deliver: there is no active Telegram communication turn." }],
+						details: { ok: false, delivered: false, reason: "no-active-turn" },
+					};
+				}
+				const commandText = params.action === "status" ? "/status" : params.action === "compact" ? "/compact" : "stop";
+				try {
+					const delivered = await deliverTurnToSession({
+						sessionId: params.sessionId,
+						chatId: turn.chatId,
+						fromUserId: turn.fromUserId,
+						replyToMessageId: turn.replyToMessageId,
+						telegramMessageIds: turn.telegramMessageIds,
+						rawText: commandText,
+						files: [],
+						reason: params.reason || `communication-agent:${params.action}`,
+						source: "communication_agent",
+						delegatedByRequestId: turn.requestId,
+					});
+					return {
+						content: [{ type: "text", text: `Sent ${params.action} to ${delivered.sessionLabel}.` }],
+						details: { ok: true, delivered: true, delegatedReplyExpected: true, action: params.action, commandText, ...delivered },
+					};
+				} catch (error) {
+					return {
+						content: [{ type: "text", text: `Could not deliver: ${errorMessage(error)}` }],
+						details: { ok: false, delivered: false, sessionId: params.sessionId, action: params.action, reason: errorMessage(error) },
+					};
+				}
+			},
+		}),
+	];
+}
+
+async function ensureCommunicationAgent() {
+	if (communicationAgent) return communicationAgent;
+	if (communicationAgentReady) return communicationAgentReady;
+	communicationAgentReady = (async () => {
+		const cwd = TELEGRAM_DIR;
+		const agentDir = getAgentDir();
+		await mkdir(COMMUNICATION_AGENT_SESSION_DIR, { recursive: true });
+		const authStorage = AuthStorage.create();
+		const modelRegistry = ModelRegistry.create(authStorage);
+		const settingsManager = SettingsManager.create(cwd, agentDir);
+		const resourceLoader = new DefaultResourceLoader({
+			cwd,
+			agentDir,
+			settingsManager,
+			noExtensions: true,
+			noSkills: true,
+			noPromptTemplates: true,
+			noThemes: true,
+			noContextFiles: true,
+			systemPromptOverride: () => buildCommunicationSystemPrompt(),
+		});
+		await resourceLoader.reload();
+		const { session } = await createAgentSession({
+			cwd,
+			authStorage,
+			modelRegistry,
+			settingsManager,
+			resourceLoader,
+			sessionManager: SessionManager.continueRecent(cwd, COMMUNICATION_AGENT_SESSION_DIR),
+			tools: COMMUNICATION_AGENT_TOOL_NAMES,
+			customTools: createCommunicationTools(),
+			thinkingLevel: "low",
+		});
+		const unsubscribe = session.subscribe(handleCommunicationAgentEvent);
+		communicationAgent = { session, unsubscribe };
+		communicationLastError = undefined;
+		await writeStatus();
+		return communicationAgent;
+	})().catch(async (error) => {
+		communicationAgentReady = undefined;
+		communicationLastError = `communication agent failed: ${errorMessage(error)}`;
+		await log(communicationLastError);
+		await writeStatus();
+		throw error;
+	});
+	return communicationAgentReady;
+}
+
+function ensureCommunicationPreview(turn) {
+	if (previews.has(turn.requestId)) return;
+	previews.set(turn.requestId, {
+		requestId: turn.requestId,
+		chatId: turn.chatId,
+		mode: draftSupport === "unsupported" ? "message" : "draft",
+		pendingText: "",
+		lastSentText: "",
+	});
+}
+
+function handleCommunicationAgentEvent(event) {
+	const turn = communicationActiveTurn;
+	if (!turn) return;
+	if (event.type === "message_start" && event.message?.role === "assistant") {
+		communicationCurrentText = "";
+		ensureCommunicationPreview(turn);
 		return;
 	}
+	if (event.type !== "message_update" || event.assistantMessageEvent?.type !== "text_delta") return;
+	communicationCurrentText += event.assistantMessageEvent.delta;
+	ensureCommunicationPreview(turn);
+	const preview = previews.get(turn.requestId);
+	if (!preview) return;
+	preview.pendingText = communicationCurrentText;
+	schedulePreviewFlush(turn.requestId);
+}
+
+async function buildCommunicationTurn(messages) {
 	const first = messages[0];
 	const rawText = rawTextForMessages(messages);
 	const files = await buildTelegramFiles(messages);
-	const requestId = randomUUID();
-	const delivered = sendToClient(session, {
-		v: 1,
-		type: "deliver_turn",
-		requestId,
+	const replyToLinkedSessionId = findReplyRoute(first);
+	const telegramMessageIds = messages.map((message) => message.message_id);
+	const turn = {
+		requestId: randomUUID(),
 		chatId: first.chat.id,
 		fromUserId: first.from.id,
 		replyToMessageId: first.message_id,
+		telegramMessageIds,
 		rawText,
-		telegramMessageIds: messages.map((message) => message.message_id),
 		files,
+		replyToLinkedSessionId,
+		replyTo: first.reply_to_message
+			? {
+					messageId: first.reply_to_message.message_id,
+					text: clip(first.reply_to_message.text || first.reply_to_message.caption || "", 400),
+				}
+			: undefined,
+	};
+	turn.prompt = buildCommunicationPrompt(turn);
+	addTelegramHistory({
+		direction: "in",
+		source: "telegram-user",
+		chatId: first.chat.id,
+		messageId: first.message_id,
+		messageIds: telegramMessageIds,
+		text: clip(rawText || describeFiles(files), 700),
+		replyToLinkedSessionId,
 	});
-	if (!delivered) {
-		await askUserToChoose(messages, `Session is no longer reachable (${sessionId}).`);
-		return;
-	}
-	addTelegramHistory({ direction: "in", chatId: first.chat.id, messageId: first.message_id, text: clip(rawText || describeFiles(fileSummaries(messages)), 700), sessionId });
-	addRouteDecision({ chatId: first.chat.id, messageId: first.message_id, sessionId, reason });
 	await writeState();
+	return turn;
+}
+
+function buildCommunicationPrompt(turn) {
+	const connected = getConnectedSessions();
+	const input = {
+		incoming: {
+			chatId: turn.chatId,
+			fromUserId: turn.fromUserId,
+			messageIds: turn.telegramMessageIds,
+			text: clip(turn.rawText, COMMUNICATION_TEXT_LIMIT),
+			attachments: turn.files.map((file) => ({ fileName: file.fileName, path: file.path, mimeType: file.mimeType, isImage: file.isImage })),
+			replyTo: turn.replyTo,
+		},
+		routingHints: {
+			replyToLinkedSessionId: turn.replyToLinkedSessionId,
+			onlyConnectedSessionId: connected.length === 1 ? connected[0].sessionId : undefined,
+			connectedSessionCount: connected.length,
+		},
+		telegramHistory: state.telegramHistory.slice(-20),
+		routeDecisions: state.routeDecisions.slice(-20),
+		sessions: connected.map(communicationSessionSnapshot),
+	};
+	return `Handle this Telegram message. Decide whether to answer directly or delegate to a connected pi session with your tools.\n\nTelegram turn:\n${JSON.stringify(input, null, 2)}`;
 }
 
 async function routeAuthorizedMessages(messages) {
 	const first = messages[0];
 	if (!first) return;
-
-	const choice = findPendingChoice(first);
-	if (choice) {
-		await handleChoiceReply(choice, first);
-		return;
-	}
-
-	const replySessionId = findReplyRoute(first);
-	if (replySessionId) {
-		await deliverMessagesToSession(replySessionId, messages, "reply-to-linked-message");
-		return;
-	}
-
-	const connected = [...sessions.values()].filter((session) => session.socket.writable);
-	if (connected.length === 0) {
-		await sendTextReply(first.chat.id, "No running pi sessions are connected to the Telegram broker yet.");
-		return;
-	}
-	if (connected.length === 1) {
-		await deliverMessagesToSession(connected[0].sessionId, messages, "only-connected-session");
-		return;
-	}
-
-	const routed = await routeWithLlm(messages, connected);
-	if (routed?.action === "route" && routed.confidence >= ROUTER_CONFIDENCE_THRESHOLD && sessions.has(routed.sessionId)) {
-		await deliverMessagesToSession(routed.sessionId, messages, `llm:${clip(routed.reason || "", 160)}`);
-		return;
-	}
-
-	await askUserToChoose(messages, routed?.reason || "I could not confidently choose a pi session.", routed?.options?.map((option) => option.sessionId));
+	const turn = await buildCommunicationTurn(messages);
+	enqueueCommunicationTurn(turn);
 }
 
-async function runRouterPrompt(prompt) {
-	const cwd = TELEGRAM_DIR;
-	const agentDir = getAgentDir();
-	const authStorage = AuthStorage.create();
-	const modelRegistry = ModelRegistry.create(authStorage);
-	const settingsManager = SettingsManager.create(cwd, agentDir);
-	const resourceLoader = new DefaultResourceLoader({
-		cwd,
-		agentDir,
-		settingsManager,
-		noExtensions: true,
-		noSkills: true,
-		noPromptTemplates: true,
-		noThemes: true,
-		noContextFiles: true,
-		systemPrompt: "You are a router for Telegram messages going to running pi coding-agent sessions. Return only strict JSON.",
-	});
-	await resourceLoader.reload();
-	const { session } = await createAgentSession({
-		cwd,
-		authStorage,
-		modelRegistry,
-		settingsManager,
-		resourceLoader,
-		sessionManager: SessionManager.inMemory(),
-		noTools: "all",
-		thinkingLevel: "low",
-	});
+function enqueueCommunicationTurn(turn) {
+	communicationQueue.push(turn);
+	void processCommunicationQueue().catch((error) => void log(`communication queue failed: ${errorMessage(error)}`));
+	void writeStatus();
+}
+
+async function processCommunicationQueue() {
+	if (communicationProcessing) return;
+	communicationProcessing = true;
 	try {
-		await session.prompt(prompt, { expandPromptTemplates: false });
-		return extractAssistantText(session.messages);
+		while (communicationQueue.length > 0) {
+			const turn = communicationQueue.shift();
+			await runCommunicationTurn(turn);
+		}
 	} finally {
-		session.dispose();
-	}
-}
-
-async function routeWithLlm(messages, connectedSessions) {
-	try {
-		const input = buildRouterInput(messages, connectedSessions);
-		const prompt = `Choose which connected pi session should receive this Telegram message.\n\nRules:\n- Return only JSON. Do not wrap it in markdown.\n- If one session is clearly best, return {"action":"route","sessionId":"...","confidence":0.0-1.0,"reason":"short reason"}.\n- If the best target is ambiguous, return {"action":"ask","confidence":0.0-1.0,"reason":"short reason","options":[{"sessionId":"...","label":"short label"}]}.\n- Only use one of the provided sessionId values.\n- Prefer sessions whose cwd, recent messages, active task, or previous Telegram route decisions match the incoming message.\n\nRouter input:\n${JSON.stringify(input, null, 2)}`;
-		return parseRouterJson(await runRouterPrompt(prompt));
-	} catch (error) {
-		lastError = `router failed: ${errorMessage(error)}`;
-		await log(lastError);
+		communicationProcessing = false;
 		await writeStatus();
-		return { action: "ask", confidence: 0, reason: lastError };
 	}
 }
 
-function buildRouterInput(messages, connectedSessions) {
-	const first = messages[0];
+async function runCommunicationTurn(turn) {
+	communicationActiveTurn = turn;
+	communicationCurrentText = "";
+	try {
+		const agent = await ensureCommunicationAgent();
+		ensureCommunicationPreview(turn);
+		const startIndex = agent.session.messages.length;
+		await agent.session.prompt(turn.prompt, { expandPromptTemplates: false });
+		const newMessages = agent.session.messages.slice(startIndex);
+		const finalText = (extractAssistantText(newMessages) || communicationCurrentText).trim();
+		if (finalText.length > 0 && finalText.length <= MAX_MESSAGE_LENGTH) {
+			await finalizePreview(turn.requestId, finalText);
+		} else {
+			await clearPreview(turn.requestId);
+			if (finalText.length > 0) await sendTextReply(turn.chatId, finalText);
+		}
+		communicationLastError = undefined;
+		communicationLastHandledAt = now();
+	} catch (error) {
+		communicationLastError = `communication turn failed: ${errorMessage(error)}`;
+		await log(communicationLastError);
+		await clearPreview(turn.requestId);
+		await sendTextReply(turn.chatId, `Telegram communication agent failed: ${errorMessage(error)}`);
+	} finally {
+		communicationActiveTurn = undefined;
+		communicationCurrentText = "";
+		await flushPendingTranscriptEntries();
+		await writeStatus();
+	}
+}
+
+async function deliverTurnToSession({
+	sessionId,
+	chatId,
+	fromUserId,
+	replyToMessageId,
+	telegramMessageIds,
+	rawText,
+	files,
+	reason,
+	source,
+	delegatedByRequestId,
+}) {
+	const session = sessions.get(sessionId);
+	if (!session || !session.socket.writable) throw new Error(`Session is not connected (${sessionId})`);
+	const requestId = randomUUID();
+	const delivered = sendToClient(session, {
+		v: 1,
+		type: "deliver_turn",
+		requestId,
+		chatId,
+		fromUserId,
+		replyToMessageId,
+		rawText,
+		telegramMessageIds,
+		files,
+		source,
+		delegatedByRequestId,
+	});
+	if (!delivered) throw new Error(`Session is no longer reachable (${sessionId})`);
+	const messageId = telegramMessageIds[0] ?? replyToMessageId;
+	addRouteDecision({ chatId, messageId, messageIds: telegramMessageIds, sessionId, reason, source, delegatedByRequestId });
+	await writeState();
+	await writeStatus();
 	return {
-		incoming: {
-			chatId: first.chat.id,
-			messageIds: messages.map((message) => message.message_id),
-			text: clip(rawTextForMessages(messages), ROUTER_TEXT_LIMIT),
-			attachments: fileSummaries(messages),
-			replyTo: first.reply_to_message
-				? {
-						messageId: first.reply_to_message.message_id,
-						text: clip(first.reply_to_message.text || first.reply_to_message.caption || "", 400),
-					}
-				: undefined,
-		},
-		telegramHistory: state.telegramHistory.slice(-20),
-		routeDecisions: state.routeDecisions.slice(-20),
-		sessions: connectedSessions.map((session) => ({
-			sessionId: session.sessionId,
-			cwd: session.cwd,
-			sessionFile: session.sessionFile,
-			sessionName: session.sessionName,
-			model: session.model,
-			isIdle: session.isIdle,
-			activeTurn: session.activeTurn,
-			queuedTurns: session.queuedTurns,
-			queuedByChat: session.queuedByChat,
-			lastSeenSecondsAgo: Math.round((now() - session.lastSeen) / 1000),
-			recentMessages: sanitizeSnippets(session.recentMessages),
-		})),
+		requestId,
+		sessionId,
+		sessionLabel: formatSessionLabel(session),
+		telegramMessageIds,
+		replyToMessageId,
+		filesIncluded: files.length,
+		reason,
 	};
+}
+
+async function recordCommunicationTranscript(entry, options = {}) {
+	const text = formatTranscriptEntry(entry);
+	if (!text) return;
+	if (!options.force && (communicationProcessing || communicationAgent?.session?.isStreaming)) {
+		pendingTranscriptEntries.push(entry);
+		return;
+	}
+	try {
+		const agent = await ensureCommunicationAgent();
+		if (!options.force && agent.session.isStreaming) {
+			pendingTranscriptEntries.push(entry);
+			return;
+		}
+		await agent.session.sendCustomMessage(
+			{
+				customType: "pi-telegram-transcript",
+				content: text,
+				display: false,
+				details: entry,
+			},
+			{ triggerTurn: false },
+		);
+	} catch (error) {
+		communicationLastError = `transcript record failed: ${errorMessage(error)}`;
+		await log(communicationLastError);
+		await writeStatus();
+	}
+}
+
+async function flushPendingTranscriptEntries() {
+	if (pendingTranscriptEntries.length === 0) return;
+	if (communicationAgent?.session?.isStreaming) return;
+	const entries = pendingTranscriptEntries;
+	pendingTranscriptEntries = [];
+	for (const entry of entries) {
+		await recordCommunicationTranscript(entry, { force: true });
+	}
+}
+
+function formatTranscriptEntry(entry) {
+	const lines = ["Telegram transcript entry:"];
+	lines.push(`direction: ${entry.direction}`);
+	lines.push(`source: ${entry.source}`);
+	if (entry.sessionId) lines.push(`sessionId: ${entry.sessionId}`);
+	if (entry.messageIds?.length) lines.push(`telegramMessageIds: ${entry.messageIds.join(", ")}`);
+	if (entry.text) lines.push("text:", clip(entry.text, 4000));
+	if (entry.attachments?.length) {
+		lines.push("attachments:");
+		for (const attachment of entry.attachments) {
+			lines.push(`- ${attachment.fileName}${attachment.path ? ` (${attachment.path})` : ""}`);
+		}
+	}
+	return lines.join("\n");
 }
 
 function sanitizeSnippets(snippets = []) {
@@ -744,31 +1083,6 @@ function redactSecrets(text) {
 		.replace(/\b\d{6,}:[A-Za-z0-9_-]{20,}\b/g, "[redacted]");
 }
 
-function parseRouterJson(text) {
-	const cleaned = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/```$/i, "").trim();
-	const start = cleaned.indexOf("{");
-	const end = cleaned.lastIndexOf("}");
-	if (start === -1 || end === -1 || end <= start) return undefined;
-	const parsed = JSON.parse(cleaned.slice(start, end + 1));
-	if (parsed.action === "route") {
-		return {
-			action: "route",
-			sessionId: String(parsed.sessionId || ""),
-			confidence: Number(parsed.confidence) || 0,
-			reason: typeof parsed.reason === "string" ? parsed.reason : undefined,
-		};
-	}
-	if (parsed.action === "ask") {
-		return {
-			action: "ask",
-			confidence: Number(parsed.confidence) || 0,
-			reason: typeof parsed.reason === "string" ? parsed.reason : undefined,
-			options: Array.isArray(parsed.options) ? parsed.options.filter((option) => typeof option?.sessionId === "string") : undefined,
-		};
-	}
-	return undefined;
-}
-
 function extractAssistantText(messages) {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const message = messages[i];
@@ -781,141 +1095,6 @@ function extractAssistantText(messages) {
 			.trim();
 	}
 	return "";
-}
-
-async function askUserToChoose(messages, reason, preferredSessionIds) {
-	const first = messages[0];
-	const connected = [...sessions.values()].filter((session) => session.socket.writable);
-	const preferred = Array.isArray(preferredSessionIds)
-		? preferredSessionIds.map((sessionId) => sessions.get(sessionId)).filter(Boolean)
-		: [];
-	const candidates = preferred.length > 0 ? preferred : connected;
-	if (candidates.length === 0) {
-		await sendTextReply(first.chat.id, "No running pi sessions are connected to the Telegram broker yet.");
-		return;
-	}
-	const lines = ["Which pi session should receive this message?", "", reason, ""];
-	candidates.forEach((session, index) => {
-		lines.push(`${index + 1}. ${formatSessionLabel(session)}`);
-	});
-	lines.push("", "Send a number, or reply to this message with one.");
-	const sentIds = await sendTextReply(first.chat.id, lines.join("\n"));
-	const promptMessageId = sentIds.at(-1);
-	if (promptMessageId === undefined) return;
-	deletePendingChoicesForChat(first.chat.id);
-	pendingChoices.set(messageRouteKey(first.chat.id, promptMessageId), {
-		chatId: first.chat.id,
-		promptMessageId,
-		messages,
-		candidateSessionIds: candidates.map((session) => session.sessionId),
-		createdAt: now(),
-	});
-}
-
-function isPendingChoiceExpired(choice) {
-	return now() - choice.createdAt > PENDING_CHOICE_TTL_MS;
-}
-
-function deletePendingChoicesForChat(chatId) {
-	for (const [key, choice] of pendingChoices) {
-		if (choice.chatId === chatId) pendingChoices.delete(key);
-	}
-}
-
-function findPendingChoice(message) {
-	const replyMessageId = message.reply_to_message?.message_id;
-	if (replyMessageId !== undefined) {
-		const key = messageRouteKey(message.chat.id, replyMessageId);
-		const choice = pendingChoices.get(key);
-		if (choice && isPendingChoiceExpired(choice)) {
-			pendingChoices.delete(key);
-			return undefined;
-		}
-		if (choice) return choice;
-	}
-
-	const text = (message.text || message.caption || "").trim();
-	if (!text) return undefined;
-	let latest;
-	for (const choice of pendingChoices.values()) {
-		if (choice.chatId !== message.chat.id) continue;
-		if (isPendingChoiceExpired(choice)) {
-			pendingChoices.delete(messageRouteKey(choice.chatId, choice.promptMessageId));
-			continue;
-		}
-		if (!latest || choice.createdAt > latest.createdAt) latest = choice;
-	}
-	return latest;
-}
-
-function parseChoiceJson(text) {
-	const cleaned = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/```$/i, "").trim();
-	const start = cleaned.indexOf("{");
-	const end = cleaned.lastIndexOf("}");
-	if (start === -1 || end === -1 || end <= start) return undefined;
-	const parsed = JSON.parse(cleaned.slice(start, end + 1));
-	return {
-		action: parsed.action === "select" ? "select" : "no_match",
-		sessionId: typeof parsed.sessionId === "string" ? parsed.sessionId : undefined,
-		confidence: Number(parsed.confidence) || 0,
-		reason: typeof parsed.reason === "string" ? parsed.reason : undefined,
-	};
-}
-
-async function resolveChoiceWithLlm(choice, replyMessage) {
-	const candidates = choice.candidateSessionIds
-		.map((sessionId, index) => {
-			const session = sessions.get(sessionId);
-			return session
-				? {
-						index: index + 1,
-						sessionId,
-						label: formatSessionLabel(session),
-						cwd: session.cwd,
-						sessionName: session.sessionName,
-						recentMessages: sanitizeSnippets(session.recentMessages),
-					}
-				: undefined;
-		})
-		.filter(Boolean);
-	const input = {
-		reply: {
-			text: clip(replyMessage.text || replyMessage.caption || "", 300),
-			replyToPromptMessageId: replyMessage.reply_to_message?.message_id,
-		},
-		pendingTelegramMessage: {
-			text: clip(rawTextForMessages(choice.messages), ROUTER_TEXT_LIMIT),
-			attachments: fileSummaries(choice.messages),
-		},
-		telegramHistory: state.telegramHistory.slice(-20),
-		routeDecisions: state.routeDecisions.slice(-20),
-		candidates,
-	};
-	const prompt = `A Telegram user is answering a pending pi session selection prompt. Decide which candidate they selected.\n\nRules:\n- Return only JSON. Do not wrap it in markdown.\n- If the reply selects a candidate, return {"action":"select","sessionId":"...","confidence":0.0-1.0,"reason":"short reason"}.\n- If the reply does not select a candidate, return {"action":"no_match","confidence":0.0-1.0,"reason":"short reason"}.\n- Use numeric references, natural-language references, cwd, session name, recent conversation, and the original pending Telegram message.\n- Only use one of the provided sessionId values.\n\nChoice input:\n${JSON.stringify(input, null, 2)}`;
-	return parseChoiceJson(await runRouterPrompt(prompt));
-}
-
-async function resolveChoiceSessionId(choice, replyMessage) {
-	const decision = await resolveChoiceWithLlm(choice, replyMessage).catch((error) => {
-		lastError = `choice router failed: ${errorMessage(error)}`;
-		void log(lastError);
-		void writeStatus();
-		return undefined;
-	});
-	if (decision?.action === "select" && decision.confidence >= 0.5 && choice.candidateSessionIds.includes(decision.sessionId)) {
-		return decision.sessionId;
-	}
-	return undefined;
-}
-
-async function handleChoiceReply(choice, replyMessage) {
-	const selectedSessionId = await resolveChoiceSessionId(choice, replyMessage);
-	if (!selectedSessionId || !sessions.has(selectedSessionId)) {
-		await sendTextReply(replyMessage.chat.id, "I could not match that choice. Send one of the listed numbers or names.");
-		return;
-	}
-	pendingChoices.delete(messageRouteKey(choice.chatId, choice.promptMessageId));
-	await deliverMessagesToSession(selectedSessionId, choice.messages, "telegram-user-choice");
 }
 
 function formatSessionLabel(session) {
@@ -967,7 +1146,7 @@ async function handleUpdate(update) {
 
 	const text = (message.text || "").trim().toLowerCase();
 	if (text === "/start" || text === "/help") {
-		await sendTextReply(message.chat.id, "Send me a message and I will route it to the right running pi session. Reply to a bot message to target that session. Commands routed to sessions include /status, /compact, and stop.");
+		await sendTextReply(message.chat.id, "Send me a message and I will answer as your Telegram communication agent or delegate to a running pi session. Replying to a session message gives me a strong target hint. I can also delegate /status, /compact, and stop.");
 		return;
 	}
 
@@ -1031,6 +1210,13 @@ function stopPolling() {
 	pollingController?.abort();
 	pollingController = undefined;
 	pollingPromise = undefined;
+}
+
+function disposeCommunicationAgent() {
+	communicationAgent?.unsubscribe?.();
+	communicationAgent?.session?.dispose?.();
+	communicationAgent = undefined;
+	communicationAgentReady = undefined;
 }
 
 async function startPollingIfConfigured() {
@@ -1270,11 +1456,13 @@ async function main() {
 
 process.on("SIGTERM", () => {
 	stopPolling();
+	disposeCommunicationAgent();
 	server?.close(() => process.exit(0));
 	setTimeout(() => process.exit(0), 1000).unref();
 });
 process.on("SIGINT", () => {
 	stopPolling();
+	disposeCommunicationAgent();
 	server?.close(() => process.exit(0));
 	setTimeout(() => process.exit(0), 1000).unref();
 });
