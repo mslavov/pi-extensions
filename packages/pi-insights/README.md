@@ -2,16 +2,19 @@
 
 Beautiful analytics reports for your [pi coding agent](https://pi.dev) sessions.
 
-`pi-insights` is a Pi extension that adds an `/insights` command. It scans your local Pi session history and generates a self-contained HTML dashboard with usage, model, project, session, and “rage” analytics.
+`pi-insights` is a Pi extension that adds an `/insights` command. It scans your local Pi session history and generates a self-contained HTML dashboard with usage, model, project, session, trend, recommendation, and “rage” analytics.
 
 ## Features
 
 - **Overview** — Activity calendar, sessions/tokens/cost per day, activity by hour, and top tools
+- **Trends** — Week-over-week deltas, decay-weighted activity, trajectory, anomalies, and deterministic friction signals
 - **Models** — Token distribution, per-model breakdown, thinking levels, and stop reasons
+- **Model Efficiency** — Cost/token, cost/message, session duration, and tool-error signals by model
 - **Projects** — Per-project sessions, messages, tokens, and cost with sortable bars
 - **Sessions** — Searchable/filterable session table by project name or date
+- **Recommendations** — Deterministic takeaways plus optional AI-derived goals, outcomes, friction, next steps, and “stop doing” suggestions
 - **Rage 🤬** — Profanity analytics: swear rate, filthiest model, peak hour, top words, and project breakdown
-- **Portable report** — Single self-contained HTML file; no server required, works from `file://`
+- **Portable reports** — Single self-contained HTML file and optional Markdown export; no server required, works from `file://`
 
 ## Preview
 
@@ -66,6 +69,22 @@ The report opens automatically and is written to:
 
 Each run overwrites the same report file.
 
+### Flags
+
+```text
+/insights --no-open          # generate HTML without opening the browser
+/insights --since 30d        # include sessions from the last 30 days
+/insights --refresh          # clear pi-insights caches before regenerating
+/insights -r                 # alias for --refresh
+/insights --md               # also write ~/.pi/agent/insights-reports/pi-insights.md
+```
+
+Flags can be combined, for example:
+
+```text
+/insights --no-open --since 30d --refresh --md
+```
+
 ## What gets analyzed?
 
 `pi-insights` reads local Pi session JSONL files from:
@@ -74,7 +93,31 @@ Each run overwrites the same report file.
 ~/.pi/agent/sessions/
 ```
 
-No data is uploaded by this extension. The generated report is local HTML.
+The deterministic parser and analytics run locally. Optional AI facets use the active Pi model, when available, to summarize bounded recent session excerpts into derived fields such as goals, outcomes, friction, recommendations, and stop-doing suggestions.
+
+Privacy notes:
+
+- Raw session transcripts are not stored in the generated report JSON.
+- Cache files store parsed metadata and derived AI facets, not raw transcript text.
+- If no model credentials/API are available, the report still succeeds with deterministic analysis and recommendations.
+
+## Cache and outputs
+
+Generated reports:
+
+```text
+~/.pi/agent/insights-reports/pi-insights.html
+~/.pi/agent/insights-reports/pi-insights.md   # only with --md
+```
+
+Derived caches:
+
+```text
+~/.pi/agent/usage-data/pi-insights/session-meta/
+~/.pi/agent/usage-data/pi-insights/facets/
+```
+
+Use `/insights --refresh` to bypass and recreate these caches.
 
 ## Package metadata
 
@@ -121,6 +164,10 @@ npm run test:coverage
 ```text
 index.ts          — Extension entry point; registers the /insights command
 lib/
+  cache.ts        — Versioned derived-data cache helpers
+  cli.ts          — /insights argument parsing and completions
+  facets.ts       — Optional AI facet extraction and recommendation shaping
+  markdown.ts     — Markdown report rendering
   parser.ts       — Parses JSONL session files into ParsedSession objects
   analytics.ts    — Computes aggregate stats from parsed sessions
   rage.ts         — Profanity detection
@@ -131,7 +178,7 @@ src/
   components/
     ContributionCalendar.tsx
 tests/
-  lib/            — Unit tests for parser, analytics, rage
+  lib/            — Unit tests for parser, analytics, cache, CLI, facets, Markdown, and rage
   src/            — Unit tests for frontend utils
 ```
 

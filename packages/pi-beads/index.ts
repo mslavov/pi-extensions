@@ -312,20 +312,20 @@ export default function beadsExtension(pi: ExtensionAPI): void {
 		}
 	}
 
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", (_event, ctx) => {
 		const target = createTarget(ctx);
 		startRefreshTimer(target);
-		await requestRefresh(target);
+		void requestRefresh(target);
 	});
 
-	pi.on("session_tree", async (_event, ctx) => {
+	pi.on("session_tree", (_event, ctx) => {
 		const target = createTarget(ctx);
 		startRefreshTimer(target);
-		await requestRefresh(target);
+		void requestRefresh(target);
 	});
 
-	pi.on("agent_end", async (_event, ctx) => {
-		await requestRefresh(createTarget(ctx));
+	pi.on("agent_end", (_event, ctx) => {
+		void requestRefresh(createTarget(ctx));
 	});
 
 	pi.on("before_agent_start", async (event) => {

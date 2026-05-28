@@ -12,7 +12,19 @@ import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { parseSessionFile } from "./lib/parser.js";
 import { computeAnalytics } from "./lib/analytics.js";
-import type { Analytics } from "./lib/types.js";
+import { getInsightsArgumentCompletions, getSinceCutoff, parseInsightsArgs } from "./lib/cli.js";
+import { buildAiInsights, createPiModelClient } from "./lib/facets.js";
+import { generateMarkdown } from "./lib/markdown.js";
+import {
+  CACHE_SCHEMA_VERSION,
+  FACET_PROMPT_VERSION,
+  PARSER_CACHE_VERSION,
+  clearPiInsightsCache,
+  getPiInsightsCacheDir,
+  readCachedSession,
+  writeCachedSession,
+} from "./lib/cache.js";
+import type { Analytics, ParsedSession } from "./lib/types.js";
 
 const execAsync = promisify(exec);
 const extensionDir = path.dirname(fileURLToPath(import.meta.url));
@@ -88,10 +100,31 @@ async function generateReport(
 export default function (pi: ExtensionAPI) {
   pi.registerCommand("insights", {
     description: "Generate insights report for pi sessions",
-    getArgumentCompletions: () => null,
-    handler: async (_args, ctx) => {
+    getArgumentCompletions: getInsightsArgumentCompletions,
+    handler: async (args, ctx) => {
+      const parsedArgs = parseInsightsArgs(args ?? "");
+      if (!parsedArgs.ok) {
+        ctx.ui.notify("❌ " + parsedArgs.error, "error");
+        return;
+      }
+
+      const options = parsedArgs.options;
+      const sinceCutoff = getSinceCutoff(options);
+      const cacheRoot = getPiInsightsCacheDir();
+      const sessionMetaCache = { hits: 0, misses: 0, writes: 0, errors: 0 };
+
       const reportDir = path.join(os.homedir(), ".pi", "agent", "insights-reports");
       await fs.mkdir(reportDir, { recursive: true });
+
+      if (options.refresh) {
+        try {
+          await clearPiInsightsCache(cacheRoot);
+          ctx.ui.notify("♻️ Refreshed pi-insights cache", "info");
+        } catch (err) {
+          ctx.ui.notify("❌ Cache refresh failed: " + (err as Error).message, "error");
+          return;
+        }
+      }
 
       ctx.ui.notify("📊 Building UI (first run may take a minute)...", "info");
 
@@ -125,12 +158,40 @@ export default function (pi: ExtensionAPI) {
       }
 
       ctx.ui.notify(`📁 Found ${sessionFiles.length} session files`, "info");
+      const rangeLabel = options.sinceDays ? ` from the last ${options.sinceDays} days` : "";
 
-      const sessions = [];
+      const sessions: ParsedSession[] = [];
+      const sessionFilesById = new Map<string, string>();
       let parsed = 0;
       for (const file of sessionFiles) {
-        const sess = await parseSessionFile(file);
-        if (sess) sessions.push(sess);
+        let sess: ParsedSession | null | undefined;
+        try {
+          sess = options.refresh ? undefined : await readCachedSession(file, cacheRoot);
+          if (sess) {
+            sessionMetaCache.hits++;
+          } else {
+            sessionMetaCache.misses++;
+            sess = await parseSessionFile(file);
+            if (sess) {
+              await writeCachedSession(file, sess, cacheRoot);
+              sessionMetaCache.writes++;
+            }
+          }
+        } catch {
+          sessionMetaCache.errors++;
+          sess = await parseSessionFile(file);
+          if (sess) {
+            try {
+              await writeCachedSession(file, sess, cacheRoot);
+              sessionMetaCache.writes++;
+            } catch {
+              sessionMetaCache.errors++;
+            }
+          }
+        }
+
+        if (sess) sessionFilesById.set(sess.id, file);
+        if (sess && (!sinceCutoff || sess.startTime >= sinceCutoff)) sessions.push(sess);
         parsed++;
         if (parsed % 50 === 0) {
           ctx.ui.setStatus("insights", `Parsed ${parsed}/${sessionFiles.length}...`);
@@ -138,21 +199,58 @@ export default function (pi: ExtensionAPI) {
       }
 
       if (sessions.length === 0) {
-        ctx.ui.notify("❌ No valid sessions found", "error");
+        ctx.ui.notify(`❌ No valid sessions found${rangeLabel}`, "error");
         return;
       }
 
-      ctx.ui.notify(`✅ Parsed ${sessions.length} sessions, generating report...`, "info");
+      ctx.ui.notify(`✅ Parsed ${sessions.length} sessions${rangeLabel}, generating report...`, "info");
 
       const analytics = computeAnalytics(sessions);
+      const reportPath = path.join(reportDir, "pi-insights.html");
+      const markdownPath = path.join(reportDir, "pi-insights.md");
+      analytics.cache = {
+        root: cacheRoot,
+        refreshed: options.refresh,
+        versions: {
+          schema: CACHE_SCHEMA_VERSION,
+          parser: PARSER_CACHE_VERSION,
+          facetPrompt: FACET_PROMPT_VERSION,
+        },
+        sessionMeta: sessionMetaCache,
+      };
+      analytics.export = {
+        generatedAt: new Date().toISOString(),
+        outputFormats: options.markdown ? ["html", "markdown"] : ["html"],
+        htmlPath: reportPath,
+        ...(options.markdown ? { markdownPath } : {}),
+      };
+
+      ctx.ui.notify("🧠 Extracting optional AI facets...", "info");
+      analytics.ai = await buildAiInsights({
+        sessions,
+        sessionFilesById,
+        cacheRoot,
+        refresh: options.refresh,
+        modelClient: createPiModelClient(ctx.model, ctx.modelRegistry, ctx.signal),
+      });
 
       try {
-        const reportPath = await generateReport(extensionDir, analytics, reportDir);
+        await generateReport(extensionDir, analytics, reportDir);
+        if (options.markdown) {
+          await fs.writeFile(markdownPath, generateMarkdown(analytics), "utf8");
+        }
         ctx.ui.notify(`🎉 Report ready!`, "info");
+        if (options.markdown) {
+          ctx.ui.notify("Markdown ready: " + markdownPath, "info");
+        }
         ctx.ui.setStatus("insights", undefined);
-        try {
-          await execAsync(`open "${reportPath}"`);
-        } catch {
+        if (options.openReport) {
+          try {
+            await execAsync(`open "${reportPath}"`);
+          } catch {
+            ctx.ui.notify("Open manually: " + reportPath, "info");
+          }
+        } else {
           ctx.ui.notify("Open manually: " + reportPath, "info");
         }
       } catch (err) {

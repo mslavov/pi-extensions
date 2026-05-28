@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, type ReactNode } from 'react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell, AreaChart, Area, Legend, LineChart, Line
@@ -104,7 +104,11 @@ function filterAnalyticsByDate(analytics: Analytics, range: DateRange): Analytic
     })
     .map(toComputedSession);
 
-  return computeAnalytics(sessions) as unknown as Analytics;
+  const filtered = computeAnalytics(sessions) as unknown as Analytics;
+  filtered.ai = analytics.ai;
+  filtered.cache = analytics.cache;
+  filtered.export = analytics.export;
+  return filtered;
 }
 
 // ── Stat Card ───────────────────────────────────────────────────────
@@ -405,6 +409,208 @@ function RageTab({ rage, totalUserMessages }: { rage: RageStats; totalUserMessag
   );
 }
 
+function DeltaValue({ value, format = 'number' }: { value: number; format?: 'number' | 'cost' }) {
+  const positive = value > 0;
+  const display = format === 'cost' ? formatCost(Math.abs(value)) : formatNumber(Math.abs(value));
+  return <span style={{ color: positive ? '#f87171' : value < 0 ? '#34d399' : '#888' }}>{positive ? '+' : value < 0 ? '−' : ''}{display}</span>;
+}
+
+function TrendsTab({ data }: { data: Analytics }) {
+  const temporal = data.temporal;
+
+  if (!temporal) {
+    return <EmptyState title="No trend data" detail="Temporal analytics were not generated for this report." />;
+  }
+
+  return (
+    <>
+      <div className="stats-grid">
+        <StatCard value={temporal.trajectory?.cost ?? 'stable'} label="Cost Trajectory" sublabel="week over week" />
+        <StatCard value={temporal.trajectory?.errors ?? 'stable'} label="Error Trajectory" sublabel="week over week" />
+        <StatCard value={formatNumber(Math.round(temporal.decayWeightedActivity?.sessions ?? 0))} label="Weighted Sessions" sublabel={`${temporal.decayHalfLifeDays ?? 10}d half-life`} />
+        <StatCard value={formatCost(temporal.decayWeightedActivity?.cost ?? 0)} label="Weighted Cost" sublabel="recent sessions count more" />
+      </div>
+
+      <div className="section">
+        <div className="section-header"><h2 className="section-title">What Changed This Week</h2></div>
+        <div className="section-subtitle">Current 7-day window compared with the previous 7 days</div>
+        <div className="chart-card insight-grid">
+          <InsightMetric label="Sessions" value={<DeltaValue value={temporal.weekOverWeek?.sessionsDelta ?? 0} />} />
+          <InsightMetric label="Cost" value={<DeltaValue value={temporal.weekOverWeek?.costDelta ?? 0} format="cost" />} />
+          <InsightMetric label="Tool errors" value={<DeltaValue value={temporal.weekOverWeek?.toolErrorDelta ?? 0} />} />
+        </div>
+      </div>
+
+      <div className="chart-row">
+        <div className="section">
+          <div className="section-header"><h2 className="section-title">Anomalies</h2></div>
+          <div className="section-subtitle">Cost and error spikes detected deterministically</div>
+          <div className="chart-card">
+            {temporal.anomalies?.length ? temporal.anomalies.map((item, index) => <InsightItem key={index} item={item} />) : <MutedText>No anomalies detected.</MutedText>}
+          </div>
+        </div>
+
+        <div className="section">
+          <div className="section-header"><h2 className="section-title">Friction Signals</h2></div>
+          <div className="section-subtitle">Resolved vs ongoing deterministic friction</div>
+          <div className="chart-card">
+            <h3 className="mini-heading">Ongoing</h3>
+            {temporal.deterministicFriction?.ongoing.length ? temporal.deterministicFriction.ongoing.map((item, index) => <InsightItem key={index} item={item} />) : <MutedText>No ongoing deterministic friction.</MutedText>}
+            <h3 className="mini-heading" style={{ marginTop: 16 }}>Resolved</h3>
+            {temporal.deterministicFriction?.resolved.length ? temporal.deterministicFriction.resolved.map((item, index) => <InsightItem key={index} item={item} />) : <MutedText>No recently resolved friction signals.</MutedText>}
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function ModelEfficiencyTab({ data }: { data: Analytics }) {
+  const summary = data.modelEfficiency;
+  const maxCost = Math.max(...(summary?.models.map(model => model.cost) ?? []), 1);
+
+  if (!summary || summary.models.length === 0) {
+    return <EmptyState title="No model-efficiency data" detail="No token-generating model usage was found for this date range." />;
+  }
+
+  return (
+    <>
+      <div className="section">
+        <div className="section-header"><h2 className="section-title">Model Efficiency</h2></div>
+        <div className="section-subtitle">Cost, throughput, duration, and tool-error signals by model</div>
+        <div className="chart-card">
+          {summary.models.map((model, index) => (
+            <div key={model.model} className="efficiency-row">
+              <ModelBar name={model.model} value={model.cost} max={maxCost} color={COLORS[index % COLORS.length]} />
+              <div className="efficiency-metrics">
+                <span>{formatNumber(model.tokens)} tokens</span>
+                <span>{formatCost(model.cost)} total</span>
+                <span>{formatCost(model.costPerToken)} / token</span>
+                <span>{formatCost(model.costPerMessage)} / msg</span>
+                <span>{formatDuration(model.avgSessionDuration)} avg</span>
+                <span>{((model.toolErrorRate ?? 0) * 100).toFixed(0)}% error-rate</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="section">
+        <div className="section-header"><h2 className="section-title">Efficiency Recommendations</h2></div>
+        <div className="chart-card">
+          {summary.recommendations.length ? summary.recommendations.map((rec, index) => <InsightItem key={index} item={{ severity: 'info', title: 'Recommendation', detail: rec }} />) : <MutedText>No model-efficiency recommendations generated.</MutedText>}
+        </div>
+      </div>
+    </>
+  );
+}
+
+function RecommendationsTab({ data }: { data: Analytics }) {
+  const ai = data.ai;
+  const analysis = data.analysis;
+  const availableAi = ai && ai.status !== 'unavailable' ? ai : undefined;
+
+  return (
+    <>
+      <div className="section">
+        <div className="section-header"><h2 className="section-title">Deterministic Analysis</h2></div>
+        <div className="section-subtitle">Generated locally from session metadata, trends, friction, and model-efficiency signals</div>
+        <div className="chart-card">
+          {analysis?.takeaways.length ? analysis.takeaways.map((item, index) => <InsightItem key={index} item={item} />) : <MutedText>No deterministic takeaways generated for this date range.</MutedText>}
+        </div>
+      </div>
+
+      <div className="chart-row">
+        <RecommendationSection title="Recommended Next Steps" empty="No deterministic recommendations generated." items={analysis?.recommendations ?? []} />
+        <RecommendationSection title="Consider Stopping" empty="No deterministic stop-doing suggestions generated." items={analysis?.stopDoing ?? []} />
+      </div>
+
+      <div className="section">
+        <div className="section-header"><h2 className="section-title">AI Facet Source</h2></div>
+        <div className="chart-card insight-grid">
+          <InsightMetric label="Status" value={ai?.status ?? 'unavailable'} />
+          <InsightMetric label="Cache" value={ai?.cacheState ?? 'skipped'} />
+          <InsightMetric label="Range" value={ai?.sourceRange ? `${localDate(ai.sourceRange.start)} – ${localDate(ai.sourceRange.end)}` : 'not generated'} />
+        </div>
+        <div className="section-subtitle" style={{ marginTop: 10 }}>{availableAi ? 'AI facets are generated at report time and are not recomputed by browser-side date filtering.' : (ai?.unavailableReason ?? 'AI facets were not generated; deterministic analysis above remains available.')}</div>
+      </div>
+
+      {availableAi && (
+        <>
+          <div className="chart-row">
+            <RecommendationSection title="AI Next Steps" empty="No AI recommendations generated." items={availableAi.recommendations} />
+            <RecommendationSection title="AI Stop-Doing Suggestions" empty="No AI stop-doing suggestions generated." items={availableAi.stopDoing} />
+          </div>
+
+          <div className="section">
+            <div className="section-header"><h2 className="section-title">Session Facets</h2></div>
+            <div className="chart-card facets-grid">
+              {availableAi.facets.length ? availableAi.facets.map(facet => (
+                <div className="facet-card" key={facet.sessionId}>
+                  <div className="facet-title">{facet.goal ?? facet.summary ?? facet.sessionId}</div>
+                  <div className="facet-meta">{facet.sessionType ?? 'session'} · {facet.satisfaction ?? 'unknown satisfaction'}</div>
+                  {facet.outcome && <p>{facet.outcome}</p>}
+                  {facet.friction?.length ? <div className="facet-tags">{facet.friction.map(item => <span className="tag" key={item}>{item}</span>)}</div> : null}
+                </div>
+              )) : <MutedText>No AI session facets generated.</MutedText>}
+            </div>
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
+function RecommendationSection({ title, empty, items }: { title: string; empty: string; items: NonNullable<Analytics['ai']>['recommendations'] }) {
+  return (
+    <div className="section">
+      <div className="section-header"><h2 className="section-title">{title}</h2></div>
+      <div className="chart-card">
+        {items.length ? items.map((item, index) => (
+          <div className="recommendation" key={`${item.title}-${index}`}>
+            <div className="recommendation-title">{item.title}</div>
+            <div className="recommendation-detail">{item.detail}</div>
+            {item.prompt && <code>{item.prompt}</code>}
+          </div>
+        )) : <MutedText>{empty}</MutedText>}
+      </div>
+    </div>
+  );
+}
+
+function InsightMetric({ label, value }: { label: string; value: ReactNode }) {
+  return (
+    <div className="insight-metric">
+      <div className="insight-metric-label">{label}</div>
+      <div className="insight-metric-value">{value}</div>
+    </div>
+  );
+}
+
+function InsightItem({ item }: { item: { severity: string; title: string; detail: string } }) {
+  return (
+    <div className={`insight-item ${item.severity}`}>
+      <div className="insight-item-title">{item.title}</div>
+      <div className="insight-item-detail">{item.detail}</div>
+    </div>
+  );
+}
+
+function EmptyState({ title, detail }: { title: string; detail: string }) {
+  return (
+    <div className="section">
+      <div className="chart-card empty-state">
+        <div className="empty-title">{title}</div>
+        <div className="empty-detail">{detail}</div>
+      </div>
+    </div>
+  );
+}
+
+function MutedText({ children }: { children: ReactNode }) {
+  return <div style={{ color: '#666', fontSize: '13px' }}>{children}</div>;
+}
+
 // ── Main App ─────────────────────────────────────────────────────────
 
 function App() {
@@ -537,9 +743,12 @@ function App() {
       {/* Tabs */}
       <div className="tab-bar">
         <button className={"tab " + (activeTab === 'overview' ? 'active' : '')} onClick={() => setActiveTab('overview')}>Overview</button>
+        <button className={"tab " + (activeTab === 'trends' ? 'active' : '')} onClick={() => setActiveTab('trends')}>Trends</button>
         <button className={"tab " + (activeTab === 'models' ? 'active' : '')} onClick={() => setActiveTab('models')}>Models</button>
+        <button className={"tab " + (activeTab === 'efficiency' ? 'active' : '')} onClick={() => setActiveTab('efficiency')}>Model Efficiency</button>
         <button className={"tab " + (activeTab === 'projects' ? 'active' : '')} onClick={() => setActiveTab('projects')}>Projects</button>
         <button className={"tab " + (activeTab === 'sessions' ? 'active' : '')} onClick={() => setActiveTab('sessions')}>Sessions</button>
+        <button className={"tab " + (activeTab === 'recommendations' ? 'active' : '')} onClick={() => setActiveTab('recommendations')}>Recommendations</button>
         <button className={"tab " + (activeTab === 'rage' ? 'active' : '')} onClick={() => setActiveTab('rage')}>Rage 🤬</button>
       </div>
 
@@ -602,6 +811,8 @@ function App() {
           </div>
         </>
       )}
+
+      {activeTab === 'trends' && <TrendsTab data={data} />}
 
       {activeTab === 'models' && (
         <>
@@ -676,6 +887,8 @@ function App() {
           </div>
         </>
       )}
+
+      {activeTab === 'efficiency' && <ModelEfficiencyTab data={data} />}
 
       {activeTab === 'projects' && (
         <div className="section">
@@ -789,6 +1002,8 @@ function App() {
       {activeTab === 'rage' && (
         <RageTab rage={data.rageStats} totalUserMessages={data.totalMessages} />
       )}
+
+      {activeTab === 'recommendations' && <RecommendationsTab data={data} />}
 
       <div className="footer">
         Generated by Pi Insights Extension · {new Date().toLocaleString()}

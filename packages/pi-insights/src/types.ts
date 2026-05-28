@@ -8,7 +8,7 @@ export interface SessionEvent {
 
 export interface SessionMessage {
   role: "user" | "assistant" | "tool";
-  content?: Array<{ type: string; text?: string }>;
+  content?: Array<{ type: string; text?: string; name?: string; isError?: boolean; input?: unknown; args?: unknown; arguments?: unknown }>;
   usage?: {
     input?: number;
     output?: number;
@@ -27,8 +27,8 @@ export interface SessionMessage {
   provider?: string;
   api?: string;
   thinkingLevel?: string;
-  toolCalls?: unknown[];
-  toolResults?: unknown[];
+  toolCalls?: Array<{ name?: string; input?: unknown; args?: unknown; arguments?: unknown }>;
+  toolResults?: Array<{ name?: string; isError?: boolean }>;
   stopReason?: string;
 }
 
@@ -73,6 +73,25 @@ export interface ParsedSession {
   toolCallErrors: number;
   hasError: boolean;
   rageHits: RageHit[];
+  metadata?: SessionMetadata;
+}
+
+export interface SessionMetadata {
+  primaryModel: string;
+  responseTimesMs: number[];
+  avgResponseTimeMs: number;
+  firstResponseTimeMs?: number;
+  activityByHour: Record<string, number>;
+  filesMentioned: string[];
+  languageCounts: Record<string, number>;
+  gitActivity: {
+    commits: number;
+    pushes: number;
+    statusChecks: number;
+    diffs: number;
+  };
+  toolErrorsByName: Record<string, number>;
+  userInterruptions: number;
 }
 
 export interface DailyStats {
@@ -100,6 +119,118 @@ export interface ModelStats {
   avgDuration: number;
 }
 
+export interface InsightFlag {
+  severity: "info" | "warning" | "critical";
+  title: string;
+  detail: string;
+  sessionIds?: string[];
+}
+
+export interface TemporalInsights {
+  generatedAt: string;
+  decayHalfLifeDays?: number;
+  decayWeightedActivity?: {
+    sessions: number;
+    messages: number;
+    tokens: number;
+    cost: number;
+  };
+  weekOverWeek?: {
+    currentStart: string;
+    previousStart: string;
+    sessionsDelta: number;
+    costDelta: number;
+    toolErrorDelta: number;
+  };
+  trajectory?: {
+    cost: "improving" | "worsening" | "stable";
+    errors: "improving" | "worsening" | "stable";
+  };
+  anomalies?: InsightFlag[];
+  deterministicFriction?: {
+    ongoing: InsightFlag[];
+    resolved: InsightFlag[];
+  };
+}
+
+export interface ModelEfficiencyInsight {
+  model: string;
+  tokens: number;
+  cost: number;
+  costPerToken: number;
+  costPerMessage: number;
+  messages: number;
+  sessions: number;
+  avgSessionDuration: number;
+  toolErrorRate?: number;
+}
+
+export interface ModelEfficiencySummary {
+  generatedAt: string;
+  models: ModelEfficiencyInsight[];
+  recommendations: string[];
+}
+
+export interface AiSessionFacet {
+  sessionId: string;
+  goal?: string;
+  goalCategories?: string[];
+  outcome?: string;
+  satisfaction?: "positive" | "neutral" | "negative" | "mixed";
+  friction?: string[];
+  helpfulness?: string;
+  sessionType?: string;
+  summary?: string;
+}
+
+export interface InsightRecommendation {
+  title: string;
+  detail: string;
+  prompt?: string;
+  category?: "try" | "stop" | "workflow" | "model";
+}
+
+export interface AiInsights {
+  status: "available" | "unavailable" | "partial";
+  generatedAt?: string;
+  sourceRange?: { start: string; end: string };
+  cacheState?: "hit" | "miss" | "mixed" | "skipped";
+  unavailableReason?: string;
+  facets: AiSessionFacet[];
+  recommendations: InsightRecommendation[];
+  stopDoing: InsightRecommendation[];
+}
+
+export interface DeterministicAnalysis {
+  generatedAt: string;
+  takeaways: InsightFlag[];
+  recommendations: InsightRecommendation[];
+  stopDoing: InsightRecommendation[];
+}
+
+export interface AnalyticsCacheMetadata {
+  root: string;
+  refreshed: boolean;
+  versions: {
+    schema: string;
+    parser: string;
+    facetPrompt: string;
+  };
+  sessionMeta: {
+    hits: number;
+    misses: number;
+    writes: number;
+    errors: number;
+  };
+}
+
+export interface ReportExportMetadata {
+  generatedAt: string;
+  outputFormats: Array<"html" | "markdown">;
+  htmlPath?: string;
+  markdownPath?: string;
+}
+
 export interface Analytics {
   totalSessions: number;
   totalMessages: number;
@@ -119,6 +250,12 @@ export interface Analytics {
   modelSwitchCount: number;
   sessions: ParsedSession[];
   rageStats: RageStats;
+  cache?: AnalyticsCacheMetadata;
+  export?: ReportExportMetadata;
+  temporal?: TemporalInsights;
+  modelEfficiency?: ModelEfficiencySummary;
+  analysis?: DeterministicAnalysis;
+  ai?: AiInsights;
 }
 
 export interface RageStats {

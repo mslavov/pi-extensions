@@ -185,4 +185,55 @@ describe("parseSessionFile", () => {
     expect(result).not.toBeNull();
     expect(result!.userMessageCount).toBe(1);
   });
+
+  it("extracts deterministic timing and activity metadata", async () => {
+    const filePath = await writeTempJsonl([
+      { type: "session", id: "s1", cwd: "/repo", timestamp: "2025-03-15T10:00:00.000Z" },
+      { type: "message", timestamp: "2025-03-15T10:00:00.000Z", message: { role: "user", content: [{ type: "text", text: "please help with the app" }] } },
+      { type: "message", timestamp: "2025-03-15T10:00:03.000Z", message: { role: "assistant", model: "gpt-4", content: [], usage: { input: 10, output: 20, totalTokens: 30 } } },
+      { type: "message", timestamp: "2025-03-15T11:00:00.000Z", message: { role: "user", content: [] } },
+      { type: "message", timestamp: "2025-03-15T11:00:07.000Z", message: { role: "assistant", model: "gpt-4", content: [], usage: { input: 10, output: 20, totalTokens: 30 } } },
+    ]);
+
+    const result = await parseSessionFile(filePath);
+
+    expect(result!.metadata?.primaryModel).toBe("gpt-4");
+    expect(result!.metadata?.responseTimesMs).toEqual([3000, 7000]);
+    expect(result!.metadata?.avgResponseTimeMs).toBe(5000);
+    const hour10 = String(new Date("2025-03-15T10:00:00.000Z").getHours());
+    const hour11 = String(new Date("2025-03-15T11:00:00.000Z").getHours());
+    expect(result!.metadata?.activityByHour).toEqual({ [hour10]: 2, [hour11]: 2 });
+  });
+
+  it("extracts file, language, git, interruption, and tool-error metadata without storing transcript text", async () => {
+    const filePath = await writeTempJsonl([
+      { type: "session", id: "s1", cwd: "/repo", timestamp: "2025-03-15T10:00:00.000Z" },
+      { type: "message", timestamp: "2025-03-15T10:00:00.000Z", message: { role: "user", content: [{ type: "text", text: "secret transcript text" }] } },
+      {
+        type: "message",
+        timestamp: "2025-03-15T10:00:03.000Z",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "toolCall", name: "Write", input: { file_path: "src/App.tsx" } },
+            { type: "toolCall", name: "Bash", input: { command: "git status && git diff && git commit -m test && git push" } },
+            { type: "toolResult", name: "Write", isError: true },
+          ],
+          stopReason: "interrupted",
+        },
+      },
+      { type: "user_interrupt", timestamp: "2025-03-15T10:00:04.000Z" },
+    ]);
+
+    const result = await parseSessionFile(filePath);
+
+    expect(result!.toolCallCount).toBe(2);
+    expect(result!.toolCallErrors).toBe(1);
+    expect(result!.metadata?.filesMentioned).toEqual(["src/App.tsx"]);
+    expect(result!.metadata?.languageCounts).toEqual({ TypeScript: 1 });
+    expect(result!.metadata?.gitActivity).toEqual({ commits: 1, pushes: 1, statusChecks: 1, diffs: 1 });
+    expect(result!.metadata?.toolErrorsByName).toEqual({ Write: 1 });
+    expect(result!.metadata?.userInterruptions).toBe(2);
+    expect(JSON.stringify(result)).not.toContain("secret transcript text");
+  });
 });

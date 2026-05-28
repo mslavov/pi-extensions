@@ -4,6 +4,21 @@ import path from "node:path";
 import type { ParsedSession, SessionEvent, SessionMessage } from "./types.js";
 import { detectRage } from "./rage.js";
 
+const LANGUAGE_BY_EXTENSION: Record<string, string> = {
+  ".ts": "TypeScript",
+  ".tsx": "TypeScript",
+  ".js": "JavaScript",
+  ".jsx": "JavaScript",
+  ".json": "JSON",
+  ".md": "Markdown",
+  ".py": "Python",
+  ".go": "Go",
+  ".rs": "Rust",
+  ".css": "CSS",
+  ".html": "HTML",
+  ".sql": "SQL",
+};
+
 export async function parseSessionFile(filePath: string): Promise<ParsedSession | null> {
   try {
     const stream = createReadStream(filePath, { encoding: "utf8" });
@@ -34,6 +49,14 @@ export async function parseSessionFile(filePath: string): Promise<ParsedSession 
     const stopReasons: Record<string, number> = {};
     let currentModel = "unknown";
     const rageHits: ParsedSession["rageHits"] = [];
+    const responseTimesMs: number[] = [];
+    const activityByHour: Record<string, number> = {};
+    const filesMentioned = new Set<string>();
+    const languageCounts: Record<string, number> = {};
+    const toolErrorsByName: Record<string, number> = {};
+    const gitActivity = { commits: 0, pushes: 0, statusChecks: 0, diffs: 0 };
+    let lastUserMessageAt: Date | null = null;
+    let userInterruptions = 0;
 
     for await (const line of rl) {
       if (!line.trim()) continue;
@@ -42,6 +65,16 @@ export async function parseSessionFile(filePath: string): Promise<ParsedSession 
 
         if (!startTime && event.timestamp) startTime = new Date(event.timestamp);
         if (event.timestamp) endTime = new Date(event.timestamp);
+
+        const eventTime = event.timestamp ? new Date(event.timestamp) : null;
+        if (eventTime && event.type === "message") {
+          const hour = String(eventTime.getHours());
+          activityByHour[hour] = (activityByHour[hour] ?? 0) + 1;
+        }
+
+        if (event.type === "interrupt" || event.type === "user_interrupt" || event.type === "abort") {
+          userInterruptions++;
+        }
 
         if (event.type === "session" || event.type === "session_info") {
           const data = event as unknown as { id?: string; cwd?: string };
@@ -73,6 +106,7 @@ export async function parseSessionFile(filePath: string): Promise<ParsedSession 
 
           if (msg.role === "user") {
             userMessages++;
+            lastUserMessageAt = eventTime;
             // Collect rage hits with the message index for accurate per-message dedup
             const textParts: string[] = [];
             if (msg.content) {
@@ -89,6 +123,11 @@ export async function parseSessionFile(filePath: string): Promise<ParsedSession 
             }
           } else if (msg.role === "assistant") {
             assistantMessages++;
+
+            if (eventTime && lastUserMessageAt) {
+              responseTimesMs.push(Math.max(0, eventTime.getTime() - lastUserMessageAt.getTime()));
+              lastUserMessageAt = null;
+            }
 
             if (msg.usage) {
               const input = msg.usage.input ?? 0;
@@ -118,6 +157,7 @@ export async function parseSessionFile(filePath: string): Promise<ParsedSession 
 
             if (msg.stopReason) {
               stopReasons[msg.stopReason] = (stopReasons[msg.stopReason] ?? 0) + 1;
+              if (msg.stopReason.toLowerCase().includes("interrupt")) userInterruptions++;
             }
           }
 
@@ -126,9 +166,11 @@ export async function parseSessionFile(filePath: string): Promise<ParsedSession 
               if (item.type === "toolCall" && item.name) {
                 toolCallCount++;
                 toolUsage[item.name] = (toolUsage[item.name] ?? 0) + 1;
+                collectToolSignals(item.name, [item.input, item.args, item.arguments], filesMentioned, languageCounts, gitActivity);
               }
               if (item.type === "toolResult" && item.isError) {
                 toolCallErrors++;
+                recordToolError(toolErrorsByName, item.name);
               }
             }
           }
@@ -136,13 +178,19 @@ export async function parseSessionFile(filePath: string): Promise<ParsedSession 
           if (msg.toolCalls) {
             toolCallCount += msg.toolCalls.length;
             for (const tc of msg.toolCalls) {
-              if (tc.name) toolUsage[tc.name] = (toolUsage[tc.name] ?? 0) + 1;
+              if (tc.name) {
+                toolUsage[tc.name] = (toolUsage[tc.name] ?? 0) + 1;
+                collectToolSignals(tc.name, [tc.input, tc.args, tc.arguments], filesMentioned, languageCounts, gitActivity);
+              }
             }
           }
 
           if (msg.toolResults) {
             for (const tr of msg.toolResults) {
-              if (tr.isError) toolCallErrors++;
+              if (tr.isError) {
+                toolCallErrors++;
+                recordToolError(toolErrorsByName, tr.name);
+              }
             }
           }
         }
@@ -156,6 +204,10 @@ export async function parseSessionFile(filePath: string): Promise<ParsedSession 
 
     const duration = Math.max(1, Math.round((endTime.getTime() - startTime.getTime()) / 60000));
     const projectName = cwd ? path.basename(cwd) : "unknown";
+    const primaryModel = getPrimaryModel(models, currentModel);
+    const avgResponseTimeMs = responseTimesMs.length > 0
+      ? Math.round(responseTimesMs.reduce((sum, value) => sum + value, 0) / responseTimesMs.length)
+      : 0;
 
     return {
       id: sessionId || path.basename(filePath, ".jsonl"),
@@ -178,8 +230,99 @@ export async function parseSessionFile(filePath: string): Promise<ParsedSession 
       toolCallErrors,
       hasError: toolCallErrors > 0,
       rageHits,
+      metadata: {
+        primaryModel,
+        responseTimesMs,
+        avgResponseTimeMs,
+        firstResponseTimeMs: responseTimesMs[0],
+        activityByHour,
+        filesMentioned: Array.from(filesMentioned).sort(),
+        languageCounts,
+        gitActivity,
+        toolErrorsByName,
+        userInterruptions,
+      },
     };
   } catch {
     return null;
   }
+}
+
+function collectToolSignals(
+  toolName: string,
+  inputs: unknown[],
+  filesMentioned: Set<string>,
+  languageCounts: Record<string, number>,
+  gitActivity: NonNullable<ParsedSession["metadata"]>["gitActivity"]
+): void {
+  for (const input of inputs) {
+    for (const filePath of extractFilePaths(input)) {
+      filesMentioned.add(filePath);
+      const language = languageForPath(filePath);
+      if (language) languageCounts[language] = (languageCounts[language] ?? 0) + 1;
+    }
+
+    if (toolName.toLowerCase() === "bash") {
+      const command = extractCommand(input);
+      if (command) recordGitActivity(command, gitActivity);
+    }
+  }
+}
+
+function extractFilePaths(value: unknown, key = ""): string[] {
+  if (typeof value === "string") {
+    return isPathKey(key) ? normalizeFilePath(value) : [];
+  }
+
+  if (Array.isArray(value)) {
+    return value.flatMap(item => extractFilePaths(item, key));
+  }
+
+  if (!value || typeof value !== "object") return [];
+
+  return Object.entries(value as Record<string, unknown>).flatMap(([childKey, childValue]) => {
+    if (childKey === "command") return [];
+    return extractFilePaths(childValue, childKey);
+  });
+}
+
+function extractCommand(value: unknown): string | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const command = (value as { command?: unknown }).command;
+  return typeof command === "string" ? command : undefined;
+}
+
+function normalizeFilePath(value: string): string[] {
+  if (value.includes("\n") || value.length > 500) return [];
+  const trimmed = value.trim();
+  if (!trimmed || !path.extname(trimmed)) return [];
+  return [trimmed];
+}
+
+function isPathKey(key: string): boolean {
+  return /^(path|file|files|filePath|file_path|notebook_path|outputPath|output_path)$/i.test(key);
+}
+
+function languageForPath(filePath: string): string | undefined {
+  return LANGUAGE_BY_EXTENSION[path.extname(filePath).toLowerCase()];
+}
+
+function recordGitActivity(command: string, gitActivity: NonNullable<ParsedSession["metadata"]>["gitActivity"]): void {
+  if (/\bgit\s+commit\b/.test(command)) gitActivity.commits++;
+  if (/\bgit\s+push\b/.test(command)) gitActivity.pushes++;
+  if (/\bgit\s+status\b/.test(command)) gitActivity.statusChecks++;
+  if (/\bgit\s+diff\b/.test(command)) gitActivity.diffs++;
+}
+
+function recordToolError(toolErrorsByName: Record<string, number>, toolName?: string): void {
+  const key = toolName || "unknown";
+  toolErrorsByName[key] = (toolErrorsByName[key] ?? 0) + 1;
+}
+
+function getPrimaryModel(models: ParsedSession["models"], fallback: string): string {
+  const [primary] = Object.entries(models).sort(([, a], [, b]) => {
+    if (b.tokens !== a.tokens) return b.tokens - a.tokens;
+    return b.count - a.count;
+  });
+  return primary?.[0] ?? fallback;
 }
