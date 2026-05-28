@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 import {
@@ -20,12 +21,14 @@ import {
 	TELEGRAM_PROGRESS_MAX_LENGTH,
 	TEMP_DIR,
 	type BrokerStatus,
+	type BrokerPresenceStatus,
 	type BrokerToClient,
 	type ClientToBroker,
 	type DownloadedTelegramFile,
 	type QueuedAttachment,
 	type SessionSnippet,
 	type TelegramConfig,
+	type TelegramNotificationKind,
 } from "./protocol.js";
 import {
 	LEGACY_NOTIFY_EVENT,
@@ -63,8 +66,11 @@ type TelegramPreviewTextMessage = AgentMessage & { role?: string };
 
 interface TelegramProgressSendResult {
 	sent: boolean;
+	queued?: boolean;
 	message?: string;
 	reason?: string;
+	presence?: BrokerPresenceStatus;
+	queuedCount?: number;
 }
 
 const TELEGRAM_ERROR_NOTIFY_DELAY_MS = 20_000;
@@ -548,6 +554,12 @@ export default function (pi: ExtensionAPI) {
 		return event.dedupeKey ?? `${event.source}:${event.kind ?? "notify"}:${event.title ?? ""}:${event.message}`;
 	}
 
+	function telegramNotificationKind(event: PiNotifyEventV1): TelegramNotificationKind {
+		if (event.kind === "ready") return "completion";
+		if (event.kind === "waiting") return "waiting";
+		return "notify";
+	}
+
 	async function handleNotifyEvent(rawEvent: unknown, ctx: ExtensionContext): Promise<void> {
 		const event = parsePiNotifyEvent(rawEvent);
 		if (!event) return;
@@ -562,7 +574,7 @@ export default function (pi: ExtensionAPI) {
 		if (sentNotifyDedupeKeys.size > 200) sentNotifyDedupeKeys.clear();
 		sentNotifyDedupeKeys.set(key, now);
 
-		await sendTelegramProgress(formatNotifyMessage(event), ctx);
+		await sendTelegramProgress(formatNotifyMessage(event), ctx, telegramNotificationKind(event));
 	}
 
 	function installNotifyListener(eventName: typeof PI_NOTIFY_EVENT | typeof LEGACY_NOTIFY_EVENT): void {
@@ -640,7 +652,7 @@ export default function (pi: ExtensionAPI) {
 		await broker.request({ v: 1, type: "send_text", id: randomUUID(), chatId, text, linkToSession: true }).catch(() => undefined);
 	}
 
-	async function sendTelegramProgress(text: string, ctx: ExtensionContext): Promise<TelegramProgressSendResult> {
+	async function sendTelegramProgress(text: string, ctx: ExtensionContext, notificationKind: TelegramNotificationKind = "progress"): Promise<TelegramProgressSendResult> {
 		const message = clampProgressText(text);
 		if (!message) return { sent: false, reason: "Progress message is empty" };
 		if (isEphemeralSession(ctx)) {
@@ -656,7 +668,7 @@ export default function (pi: ExtensionAPI) {
 		}
 		if (!broker.connected) return { sent: false, message, reason: "Telegram broker is not connected" };
 		try {
-			const result = await broker.request<TelegramProgressSendResult>({ v: 1, type: "send_progress", id: randomUUID(), text: message });
+			const result = await broker.request<TelegramProgressSendResult>({ v: 1, type: "send_progress", id: randomUUID(), text: message, notificationKind });
 			return result;
 		} catch (error) {
 			return { sent: false, message, reason: error instanceof Error ? error.message : String(error) };
@@ -873,6 +885,19 @@ export default function (pi: ExtensionAPI) {
 		return `- [${cwdName}:${sessionSlug}] pid ${session.pid} · ${state}${queued}${model}`;
 	}
 
+	function formatStatusPresence(presence: BrokerStatus["presence"] | undefined): string[] {
+		if (!presence) return ["Presence: unavailable (restart the broker to enable presence status)"];
+		const idle = presence.idleSeconds === undefined ? "unknown idle" : `${presence.idleSeconds}s idle`;
+		const updated = presence.updatedAt ? ` · updated ${new Date(presence.updatedAt).toLocaleTimeString()}` : "";
+		const threshold = `away ≥${presence.awayAfterSeconds}s, present ≤${presence.presentBelowSeconds}s, poll ${presence.pollIntervalSeconds}s`;
+		const lines = [
+			`Presence: ${presence.state} · ${idle} · ${presence.provider}${presence.enabled ? "" : " disabled"}${updated}`,
+			`Presence policy: ${presence.notificationPolicy} (${threshold})`,
+		];
+		if (presence.lastError) lines.push(`Presence error: ${presence.lastError}`);
+		return lines;
+	}
+
 	const broker = new BrokerClient(
 		connectionId,
 		() => config.brokerSecret,
@@ -918,26 +943,35 @@ export default function (pi: ExtensionAPI) {
 		name: "telegram_progress",
 		label: "Telegram Progress",
 		description: "Send a brief progress or key-point update to the connected Telegram chat for the active pi session.",
-		promptSnippet: "Send a brief progress or key-point update to the connected Telegram chat.",
+		promptSnippet: "Send a brief progress or key-point update for the broker to deliver, queue, or drop based on Telegram presence policy.",
 		promptGuidelines: [
-			"Use telegram_progress when the Telegram bridge is connected and the session was started locally, for meaningful milestones, blockers, or long-running work.",
+			"Use telegram_progress in locally started sessions for meaningful milestones, blockers, and periodic long-running-work updates; do not try to infer whether the user is present because the broker decides whether to deliver, queue, summarize, or drop each update.",
 			"Keep telegram_progress messages short and do not include secrets, tokens, raw command output, or repetitive status.",
 			"Do not use telegram_progress for Telegram-originated turns unless the user explicitly asks, because those turns already stream previews.",
 		],
+		renderShell: "self",
 		parameters: Type.Object({
 			message: Type.String({ description: "Brief progress update to send", minLength: 1, maxLength: TELEGRAM_PROGRESS_MAX_LENGTH }),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const result = await sendTelegramProgress(params.message, ctx);
+			const text = result.sent
+				? "Sent Telegram progress update."
+				: result.queued
+				? "Queued Telegram progress update for away summary."
+				: `Skipped Telegram progress update: ${result.reason ?? "unavailable"}.`;
 			return {
-				content: [
-					{
-						type: "text",
-						text: result.sent ? "Sent Telegram progress update." : `Skipped Telegram progress update: ${result.reason ?? "unavailable"}.`,
-					},
-				],
+				content: [{ type: "text", text }],
 				details: result,
 			};
+		},
+		renderCall(_args, theme) {
+			return new Text(theme.fg("muted", "↗ Telegram progress"), 0, 0);
+		},
+		renderResult(result, _options, theme) {
+			const details = result.details as TelegramProgressSendResult | undefined;
+			const state = details?.sent ? "sent" : details?.queued ? "queued" : "held";
+			return new Text(theme.fg("muted", `↗ Telegram progress ${state}`), 0, 0);
 		},
 	});
 
@@ -967,6 +1001,7 @@ export default function (pi: ExtensionAPI) {
 				`Allowed user: ${brokerStatus?.allowedUserId ?? config.allowedUserId ?? "not paired"}`,
 				`Broker: ${broker.connected ? `running${brokerStatus ? ` (pid ${brokerStatus.brokerPid})` : ""}` : "stopped"}`,
 				`Polling: ${brokerStatus?.polling ? "running" : "stopped"}`,
+				...formatStatusPresence(brokerStatus?.presence),
 				`This session: ${broker.connected ? "registered" : "not registered"}`,
 				`Config: ${CONFIG_PATH}`,
 				`Active Telegram turn: ${activeTelegramTurn ? "yes" : "no"}`,
@@ -1054,7 +1089,7 @@ export default function (pi: ExtensionAPI) {
 			? "- Telegram notifications are disabled in subagent sessions. Do not call telegram_progress."
 			: isTelegramPrompt(event.prompt)
 			? "- The current user message came from Telegram. Do not call telegram_progress unless the user explicitly asks; Telegram-originated turns already stream previews."
-			: "- When the Telegram bridge is connected and this session was started locally, use telegram_progress for meaningful milestones, blockers, or long-running work. Keep updates short and avoid secrets, raw command output, or repetitive status.";
+			: "- When the Telegram bridge is connected and this session was started locally, use telegram_progress for meaningful milestones, blockers, and periodic long-running-work updates; do not decide based on local presence yourself. The broker delivers, queues/summarizes, or drops updates according to presence policy. Keep updates short and avoid secrets, raw command output, or repetitive status.";
 		return { systemPrompt: `${event.systemPrompt}${SYSTEM_PROMPT_SUFFIX}\n${progressGuidance}` };
 	});
 

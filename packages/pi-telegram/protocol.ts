@@ -8,6 +8,37 @@ export interface TelegramConfig {
 	allowedUserId?: number;
 	lastUpdateId?: number;
 	brokerSecret?: string;
+	presence?: TelegramPresenceConfig;
+}
+
+export type PresenceState = "present" | "away" | "unknown";
+export type PresenceMode = "auto" | "disabled";
+export type PresenceProvider = "macos-hid-idle" | "disabled";
+export type PresenceNotificationPolicy = "away_only" | "present_only" | "always" | "never";
+export type TelegramNotificationKind = "progress" | "completion" | "waiting" | "notify" | "error";
+
+export interface TelegramPresenceConfig {
+	enabled?: boolean;
+	mode?: PresenceMode;
+	provider?: PresenceProvider;
+	awayAfterSeconds?: number;
+	presentBelowSeconds?: number;
+	pollIntervalSeconds?: number;
+	notificationPolicy?: PresenceNotificationPolicy;
+}
+
+export interface BrokerPresenceStatus {
+	enabled: boolean;
+	mode: PresenceMode;
+	provider: PresenceProvider;
+	state: PresenceState;
+	notificationPolicy: PresenceNotificationPolicy;
+	awayAfterSeconds: number;
+	presentBelowSeconds: number;
+	pollIntervalSeconds: number;
+	idleSeconds?: number;
+	updatedAt?: number;
+	lastError?: string;
 }
 
 export interface DownloadedTelegramFile {
@@ -50,6 +81,7 @@ export interface BrokerStatus {
 	polling: boolean;
 	brokerPid: number;
 	lastUpdateId?: number;
+	presence: BrokerPresenceStatus;
 	sessions: BrokerSessionSnapshot[];
 	communicationAgent?: {
 		enabled: boolean;
@@ -84,7 +116,7 @@ export type ClientToBroker =
 			errorMessage?: string;
 			attachments: QueuedAttachment[];
 		}
-	| { v: 1; type: "send_progress"; id: string; text: string }
+	| { v: 1; type: "send_progress"; id: string; text: string; notificationKind?: TelegramNotificationKind }
 	| { v: 1; type: "local_error"; errorMessage: string };
 
 export type BrokerToClient =

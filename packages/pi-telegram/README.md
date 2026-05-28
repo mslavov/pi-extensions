@@ -161,6 +161,37 @@ Locally started successful turns also send one concise completion notification t
 
 If a locally started pi run stops with an error while Telegram is paired, the broker sends the error to Telegram after a short delay so you can reply with next instructions. Telegram-originated turns still receive errors as their normal reply.
 
+### Presence-aware local notifications
+
+The broker can use local computer idle time to decide when locally started sessions should send proactive Telegram progress updates. On macOS it reads aggregate `HIDIdleTime` from `IOHIDSystem` with a fixed `/usr/sbin/ioreg -l -c IOHIDSystem` command. It does not capture raw keyboard events, mouse events, key names, pointer positions, window titles, or application focus.
+
+Default behavior:
+
+- Agents are encouraged to call `telegram_progress` for meaningful milestones and periodic long-running-work updates; the broker decides whether to deliver, queue, summarize, or drop each update.
+- `telegram_progress` and general `pi:notify` updates created before the `away` threshold are queued in memory. If you return before the threshold, the queue is dropped. If you remain away, Telegram receives a concise summary at the away transition and then receives regular updates until you return.
+- Concise completion notifications, `ask_user` waiting notices, and delayed local error notices keep the existing low-noise behavior.
+- Telegram-originated turns still stream previews and final replies; they do not get duplicate progress/completion messages.
+- If presence is `unknown` because the provider is unavailable or failing, progress/general notifications can wait in the in-memory pending queue but are not delivered unless presence reaches `away`.
+- `telegram_progress` calls are rendered compactly in local sessions so present-time updates are less distracting.
+
+Presence settings live in `~/.pi/agent/extensions/telegram/telegram.json` under `presence`:
+
+```json
+{
+  "presence": {
+    "enabled": true,
+    "mode": "auto",
+    "provider": "macos-hid-idle",
+    "awayAfterSeconds": 300,
+    "presentBelowSeconds": 60,
+    "pollIntervalSeconds": 15,
+    "notificationPolicy": "away_only"
+  }
+}
+```
+
+`notificationPolicy` supports `away_only`, `present_only`, `always`, and `never`. Run `/telegram-status` to see the current presence state, idle seconds, thresholds, provider, and provider errors.
+
 ### Inter-extension notifications
 
 Other extensions can ask `pi-telegram` to notify the paired Telegram user by emitting the shared `pi:notify` event:

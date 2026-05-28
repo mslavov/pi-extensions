@@ -5,6 +5,13 @@ import { existsSync } from "node:fs";
 import { basename, extname, join } from "node:path";
 import { homedir } from "node:os";
 import { randomBytes, randomUUID } from "node:crypto";
+import {
+	derivePresenceState,
+	formatPresenceQueuedSummary,
+	readMacOsHidIdleStatus,
+	shouldQueuePresenceDelayedNotification,
+	shouldSendProactiveNotification,
+} from "./presence.mjs";
 
 import {
 	AuthStorage,
@@ -40,6 +47,17 @@ const SESSION_SWEEP_MS = 10_000;
 const COMMUNICATION_TEXT_LIMIT = 1000;
 const SESSION_SNIPPET_LIMIT = 12;
 const COMMUNICATION_AGENT_TOOL_NAMES = ["telegram_get_status", "telegram_send_to_session", "telegram_control_session"];
+const PRESENCE_PENDING_MAX_PER_SESSION = 20;
+const PRESENCE_PENDING_SUMMARY_LIMIT = 5;
+const DEFAULT_PRESENCE_CONFIG = {
+	enabled: true,
+	mode: "auto",
+	provider: "macos-hid-idle",
+	awayAfterSeconds: 300,
+	presentBelowSeconds: 60,
+	pollIntervalSeconds: 15,
+	notificationPolicy: "away_only",
+};
 
 let config = {};
 let state = {
@@ -54,10 +72,12 @@ let server;
 let lastError;
 let draftSupport = "unknown";
 let nextDraftId = 0;
+let presenceService;
 
 const sessions = new Map();
 const mediaGroups = new Map();
 const previews = new Map();
+const pendingPresenceNotifications = new Map();
 let communicationAgent;
 let communicationAgentReady;
 let communicationActiveTurn;
@@ -177,10 +197,197 @@ function buildStatus() {
 		polling: Boolean(pollingPromise),
 		brokerPid: process.pid,
 		lastUpdateId: state.lastUpdateId,
+		presence: buildPresenceStatus(),
 		sessions: [...sessions.values()].map((session) => publicSession(session)),
 		communicationAgent: communicationAgentStatus(),
 		lastError,
 	};
+}
+
+function buildPresenceStatus() {
+	if (presenceService) return presenceService.getStatus();
+	const presenceConfig = normalizePresenceConfig(config.presence);
+	return {
+		...presenceConfig,
+		state: "unknown",
+	};
+}
+
+function normalizePresenceConfig(rawPresenceConfig = {}) {
+	const raw = rawPresenceConfig && typeof rawPresenceConfig === "object" ? rawPresenceConfig : {};
+	const enabled = raw.enabled !== false && raw.mode !== "disabled";
+	const mode = enabled ? "auto" : "disabled";
+	return {
+		enabled,
+		mode,
+		provider: enabled ? normalizedChoice(raw.provider, ["macos-hid-idle"], DEFAULT_PRESENCE_CONFIG.provider) : "disabled",
+		awayAfterSeconds: positiveNumber(raw.awayAfterSeconds, DEFAULT_PRESENCE_CONFIG.awayAfterSeconds),
+		presentBelowSeconds: positiveNumber(raw.presentBelowSeconds, DEFAULT_PRESENCE_CONFIG.presentBelowSeconds),
+		pollIntervalSeconds: positiveNumber(raw.pollIntervalSeconds, DEFAULT_PRESENCE_CONFIG.pollIntervalSeconds),
+		notificationPolicy: normalizedChoice(raw.notificationPolicy, ["away_only", "present_only", "always", "never"], DEFAULT_PRESENCE_CONFIG.notificationPolicy),
+	};
+}
+
+function positiveNumber(value, fallback) {
+	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function normalizedChoice(value, allowed, fallback) {
+	return allowed.includes(value) ? value : fallback;
+}
+
+async function readConfiguredIdleStatus(presenceConfig = normalizePresenceConfig(config.presence)) {
+	if (!presenceConfig.enabled || presenceConfig.provider === "disabled") {
+		return { ok: false, error: "Presence provider is disabled." };
+	}
+	if (presenceConfig.provider !== "macos-hid-idle") {
+		return { ok: false, error: `Unsupported presence provider: ${presenceConfig.provider}` };
+	}
+	return readMacOsHidIdleStatus();
+}
+
+class PresenceService {
+	constructor() {
+		this.timer = undefined;
+		this.polling = false;
+		this.generation = 0;
+		this.settings = normalizePresenceConfig(config.presence);
+		this.status = { ...this.settings, state: "unknown" };
+	}
+
+	start() {
+		this.configure(config.presence);
+	}
+
+	stop() {
+		this.generation++;
+		if (this.timer) clearTimeout(this.timer);
+		this.timer = undefined;
+	}
+
+	configure(rawPresenceConfig) {
+		this.generation++;
+		if (this.timer) clearTimeout(this.timer);
+		this.timer = undefined;
+		this.settings = normalizePresenceConfig(rawPresenceConfig);
+		this.status = { ...this.settings, state: "unknown", updatedAt: now() };
+		if (this.settings.enabled) {
+			if (this.polling) this.schedule();
+			else void this.poll(this.generation);
+		}
+	}
+
+	getStatus() {
+		return { ...this.status };
+	}
+
+	async poll(generation = this.generation) {
+		if (!this.settings.enabled || generation !== this.generation || this.polling) return;
+		this.polling = true;
+		const settings = this.settings;
+		const previousStatus = this.status;
+		try {
+			const result = await readConfiguredIdleStatus(settings);
+			if (generation !== this.generation) return;
+			if (result.ok) {
+				this.status = {
+					...settings,
+					state: derivePresenceState(result.idleSeconds, previousStatus.state, settings),
+					idleSeconds: result.idleSeconds,
+					updatedAt: now(),
+				};
+			} else {
+				this.status = { ...settings, state: "unknown", updatedAt: now(), lastError: result.error };
+			}
+			void handlePresenceStatusUpdate(previousStatus, this.status).catch((error) => log(`presence update failed: ${errorMessage(error)}`));
+			void writeStatus();
+		} finally {
+			this.polling = false;
+			if (generation === this.generation && this.settings.enabled) this.schedule();
+		}
+	}
+
+	schedule() {
+		if (this.timer) clearTimeout(this.timer);
+		this.timer = setTimeout(() => void this.poll(), this.settings.pollIntervalSeconds * 1000);
+		this.timer.unref?.();
+	}
+}
+
+function startPresenceService() {
+	if (!presenceService) presenceService = new PresenceService();
+	presenceService.start();
+	void writeStatus();
+}
+
+function stopPresenceService() {
+	presenceService?.stop();
+	presenceService = undefined;
+}
+
+async function handlePresenceStatusUpdate(previousStatus, status) {
+	if (!status.enabled || status.notificationPolicy !== "away_only") {
+		clearPendingPresenceNotifications();
+		return;
+	}
+	if (status.state === "away" && previousStatus.state !== "away") {
+		await flushPendingPresenceNotifications();
+		return;
+	}
+	if (status.state === "present" && status.idleSeconds !== undefined && status.idleSeconds <= status.presentBelowSeconds) {
+		clearPendingPresenceNotifications();
+	}
+}
+
+function clearPendingPresenceNotifications(sessionId) {
+	if (sessionId) pendingPresenceNotifications.delete(sessionId);
+	else pendingPresenceNotifications.clear();
+}
+
+function queuePresenceNotification(client, message, notificationKind, presence) {
+	const sessionId = client.sessionId;
+	if (!sessionId) return { queued: false };
+	let queue = pendingPresenceNotifications.get(sessionId);
+	if (!queue) {
+		queue = [];
+		pendingPresenceNotifications.set(sessionId, queue);
+	}
+	queue.push({
+		message,
+		notificationKind,
+		queuedAt: now(),
+		sessionId,
+		sessionLabel: formatPendingSessionLabel(client),
+	});
+	while (queue.length > PRESENCE_PENDING_MAX_PER_SESSION) queue.shift();
+	return {
+		queued: true,
+		message,
+		presence,
+		queuedCount: queue.length,
+		reason: "Queued until presence is away",
+	};
+}
+
+async function flushPendingPresenceNotifications() {
+	if (!config.botToken || config.allowedUserId === undefined || pendingPresenceNotifications.size === 0) return;
+	const pending = [...pendingPresenceNotifications.values()].filter((updates) => updates.length > 0);
+	clearPendingPresenceNotifications();
+	for (const updates of pending) {
+		const latest = updates.at(-1);
+		const summary = formatPresenceQueuedSummary({
+			sessionLabel: latest?.sessionLabel,
+			messages: updates.map((update) => update.message),
+			itemLimit: PRESENCE_PENDING_SUMMARY_LIMIT,
+		});
+		await sendTextReply(config.allowedUserId, summary, latest?.sessionId).catch((error) => log(`presence summary failed: ${errorMessage(error)}`));
+	}
+}
+
+function formatPendingSessionLabel(client) {
+	const cwdName = basename(client.cwd || "?");
+	const sessionName = String(client.sessionName || client.sessionId || "session").slice(0, 40);
+	return `${cwdName}:${sessionName}`;
 }
 
 function communicationAgentStatus() {
@@ -1234,6 +1441,7 @@ async function reloadConfig() {
 	const previousToken = config.botToken;
 	config = await readConfig();
 	if (previousToken !== config.botToken) stopPolling();
+	presenceService?.configure(config.presence);
 	await startPollingIfConfigured();
 	await writeStatus();
 }
@@ -1309,12 +1517,13 @@ async function handleClientMessage(client, message) {
 		return;
 	}
 	if (message.type === "send_progress") {
-		const result = await sendProgress(client, message.text);
-		respond(client, message.id, result.sent, result, result.reason);
+		const result = await sendProgress(client, message.text, message.notificationKind);
+		respond(client, message.id, result.sent || result.queued, result, result.sent || result.queued ? undefined : result.reason);
 		return;
 	}
 	if (message.type === "local_error") {
-		if (config.allowedUserId !== undefined) {
+		const decision = shouldSendProactiveTelegram(client, "error");
+		if (config.allowedUserId !== undefined && decision.send) {
 			await sendTextReply(config.allowedUserId, `Pi stopped with an error:\n${clip(message.errorMessage || "Unknown error", 1500)}\n\nReply with what I should do next.`, client.sessionId).catch(() => undefined);
 		}
 	}
@@ -1346,17 +1555,36 @@ async function handleTurnResult(client, message) {
 	await sendQueuedAttachments(message.chatId, message.attachments, client.sessionId);
 }
 
-async function sendProgress(client, text) {
+async function sendProgress(client, text, notificationKind = "progress") {
 	const message = String(text || "").trim().replace(/\s+/g, " ").slice(0, TELEGRAM_PROGRESS_MAX_LENGTH).trimEnd();
 	if (!message) return { sent: false, reason: "Progress message is empty" };
 	if (!config.botToken) return { sent: false, message, reason: "Telegram bot token is not configured" };
 	if (config.allowedUserId === undefined) return { sent: false, message, reason: "Telegram bridge is not paired" };
+	const decision = shouldSendProactiveTelegram(client, notificationKind);
+	if (!decision.send) {
+		if (shouldQueuePresenceDelayedNotification({
+			presence: decision.presence,
+			notificationKind,
+			hasActiveTelegramTurn: Boolean(client.activeTurn),
+		})) {
+			return { sent: false, ...queuePresenceNotification(client, message, notificationKind, decision.presence) };
+		}
+		return { sent: false, message, reason: decision.reason, presence: decision.presence };
+	}
 	try {
 		await sendTextReply(config.allowedUserId, message, client.sessionId);
-		return { sent: true, message };
+		return { sent: true, message, presence: decision.presence };
 	} catch (error) {
-		return { sent: false, message, reason: errorMessage(error) };
+		return { sent: false, message, reason: errorMessage(error), presence: decision.presence };
 	}
+}
+
+function shouldSendProactiveTelegram(client, notificationKind = "progress") {
+	return shouldSendProactiveNotification({
+		presence: buildPresenceStatus(),
+		notificationKind,
+		hasActiveTelegramTurn: Boolean(client.activeTurn),
+	});
 }
 
 function setupSocketServer() {
@@ -1386,6 +1614,7 @@ function setupSocketServer() {
 		socket.on("close", () => {
 			if (client.sessionId && sessions.get(client.sessionId) === client) {
 				sessions.delete(client.sessionId);
+				clearPendingPresenceNotifications(client.sessionId);
 				void writeStatus();
 			}
 		});
@@ -1448,6 +1677,7 @@ async function main() {
 		server.once("listening", onListening);
 		server.listen(BROKER_SOCKET_PATH);
 	});
+	startPresenceService();
 	await writeStatus();
 	await log(`broker started pid=${process.pid}`);
 	await startPollingIfConfigured();
@@ -1456,12 +1686,14 @@ async function main() {
 
 process.on("SIGTERM", () => {
 	stopPolling();
+	stopPresenceService();
 	disposeCommunicationAgent();
 	server?.close(() => process.exit(0));
 	setTimeout(() => process.exit(0), 1000).unref();
 });
 process.on("SIGINT", () => {
 	stopPolling();
+	stopPresenceService();
 	disposeCommunicationAgent();
 	server?.close(() => process.exit(0));
 	setTimeout(() => process.exit(0), 1000).unref();
