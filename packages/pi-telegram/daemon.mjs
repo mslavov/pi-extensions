@@ -678,8 +678,9 @@ async function finalizePreview(requestId, finalText) {
 	return preview.messageId !== undefined;
 }
 
-async function sendQueuedAttachments(chatId, attachments, sessionId) {
+async function sendFileAttachments(chatId, attachments, sessionId) {
 	const caption = sessionMessagePrefix(sessionId);
+	const results = [];
 	for (const attachment of attachments) {
 		try {
 			const mediaType = guessMediaType(attachment.path);
@@ -694,6 +695,7 @@ async function sendQueuedAttachments(chatId, attachments, sessionId) {
 				attachment.path,
 				attachment.fileName,
 			);
+			results.push({ fileName: attachment.fileName, ok: true, messageId: sent.message_id });
 			linkTelegramMessage(chatId, sent.message_id, sessionId, caption ? `${caption} ${attachment.fileName}` : attachment.fileName);
 			if (sessionId) {
 				await recordCommunicationTranscript({
@@ -707,10 +709,15 @@ async function sendQueuedAttachments(chatId, attachments, sessionId) {
 				});
 			}
 		} catch (error) {
-			await sendTextReply(chatId, `Failed to send attachment ${attachment.fileName}: ${errorMessage(error)}`, sessionId);
+			const message = errorMessage(error);
+			results.push({ fileName: attachment.fileName, ok: false, error: message });
+			await sendTextReply(chatId, `Failed to send attachment ${attachment.fileName}: ${message}`, sessionId);
 		}
 	}
 	await writeState();
+	const sentCount = results.filter((result) => result.ok).length;
+	const failedCount = results.length - sentCount;
+	return { sent: failedCount === 0, sentCount, failedCount, results };
 }
 
 function guessMediaType(filePath) {
@@ -1484,6 +1491,17 @@ async function handleClientMessage(client, message) {
 		}
 		return;
 	}
+	if (message.type === "send_files") {
+		try {
+			const chatId = message.chatId ?? config.allowedUserId;
+			if (chatId === undefined) throw new Error("Telegram bridge is not paired");
+			const result = await sendFileAttachments(chatId, message.attachments, message.linkToSession ? client.sessionId : undefined);
+			respond(client, message.id, true, result);
+		} catch (error) {
+			respond(client, message.id, false, undefined, errorMessage(error));
+		}
+		return;
+	}
 	if (message.type === "preview_start") {
 		previews.set(message.requestId, {
 			requestId: message.requestId,
@@ -1552,7 +1570,7 @@ async function handleTurnResult(client, message) {
 			await sendTextReply(message.chatId, "Attached requested file(s).", client.sessionId);
 		}
 	}
-	await sendQueuedAttachments(message.chatId, message.attachments, client.sessionId);
+	await sendFileAttachments(message.chatId, message.attachments, client.sessionId);
 }
 
 async function sendProgress(client, text, notificationKind = "progress") {

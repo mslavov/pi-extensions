@@ -118,7 +118,7 @@ The broker:
 
 ### Ask for files back
 
-If you ask pi for a file or generated artifact, pi should call the `telegram_attach` tool. The broker then sends those files with the next Telegram reply.
+If you ask pi for a file or generated artifact, pi should call the `telegram_send_file` tool. During Telegram-originated turns, the broker sends those files with the final reply. During locally started turns, the broker sends them directly to your paired Telegram DM.
 
 Examples:
 
@@ -249,7 +249,7 @@ Legacy `owner.json` files from the single-session bridge are ignored.
 - Private Telegram DMs only; group chats are ignored.
 - Replies are sent as normal Telegram messages, not quote-replies.
 - Long replies are split below Telegram's 4096 character limit.
-- Outbound files are sent via `telegram_attach`.
+- Outbound files are sent via `telegram_send_file`.
 - Manual local-session progress updates are sent via `telegram_progress`.
 - Local-session completion, `pi:notify`, plan-ready, and `ask_user` waiting messages reuse the same linked Telegram delivery path as progress updates.
 - Local-session agent errors are sent to Telegram after a short delay when the bridge is paired.

@@ -73,10 +73,19 @@ interface TelegramProgressSendResult {
 	queuedCount?: number;
 }
 
+interface TelegramFileSendResult {
+	sent: boolean;
+	sentCount?: number;
+	failedCount?: number;
+	reason?: string;
+	results?: Array<{ fileName: string; ok: boolean; messageId?: number; error?: string }>;
+}
+
 const TELEGRAM_ERROR_NOTIFY_DELAY_MS = 20_000;
 const SESSION_UPDATE_INTERVAL_MS = 5_000;
 const SESSION_HISTORY_LIMIT = 12;
 const SESSION_HISTORY_TEXT_LIMIT = 800;
+const TELEGRAM_FILE_SEND_TIMEOUT_MS = 120_000;
 
 const SYSTEM_PROMPT_SUFFIX = `
 
@@ -84,8 +93,8 @@ Telegram bridge extension is active.
 - Messages forwarded from Telegram are prefixed with "[telegram]".
 - Some [telegram] messages are delegated by the persistent Telegram communication agent on the user's behalf.
 - [telegram] messages may include local temp file paths for Telegram attachments. Read those files as needed.
-- If a [telegram] user asked for a file or generated artifact, use the telegram_attach tool with the local file path so the extension can send it with your next final reply.
-- Do not assume mentioning a local file path in plain text will send it to Telegram. Use telegram_attach.`;
+- If the user asked to receive a file or generated artifact through Telegram, call telegram_send_file with the local path instead of only mentioning the path.
+- telegram_send_file works for Telegram-originated and locally-started turns when the bridge is paired.`;
 
 function isTelegramPrompt(prompt: string): boolean {
 	return prompt.trimStart().startsWith(TELEGRAM_PREFIX);
@@ -675,6 +684,26 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	async function sendTelegramFiles(attachments: QueuedAttachment[], ctx: ExtensionContext): Promise<TelegramFileSendResult> {
+		if (!broker.connected) {
+			config = await ensureBrokerSecret(await readConfig());
+			if (config.botToken) {
+				await broker.connect(ctx).catch(() => undefined);
+				startSessionUpdates(ctx);
+				broker.sendSessionUpdate(ctx);
+			}
+		}
+		if (!broker.connected) return { sent: false, reason: "Telegram broker is not connected" };
+		try {
+			return await broker.request<TelegramFileSendResult>(
+				{ v: 1, type: "send_files", id: randomUUID(), attachments, linkToSession: true },
+				TELEGRAM_FILE_SEND_TIMEOUT_MS,
+			);
+		} catch (error) {
+			return { sent: false, reason: error instanceof Error ? error.message : String(error) };
+		}
+	}
+
 	async function handleSessionStatusCommand(chatId: number, ctx: ExtensionContext): Promise<void> {
 		let totalInput = 0;
 		let totalOutput = 0;
@@ -910,31 +939,46 @@ export default function (pi: ExtensionAPI) {
 	installNotifyListener(LEGACY_NOTIFY_EVENT);
 
 	pi.registerTool({
-		name: "telegram_attach",
-		label: "Telegram Attach",
-		description: "Queue one or more local files to be sent with the next Telegram reply.",
-		promptSnippet: "Queue local files to be sent with the next Telegram reply.",
+		name: "telegram_send_file",
+		label: "Telegram Send File",
+		description: "Send one or more local files to Telegram.",
+		promptSnippet: "Send local files to Telegram.",
 		promptGuidelines: [
-			"When handling a [telegram] message and the user asked for a file or generated artifact, call telegram_attach with the local path instead of only mentioning the path in text.",
+			"When the user asks to receive a file or generated artifact through Telegram, call telegram_send_file with the local path instead of only mentioning the path in text.",
 		],
 		parameters: Type.Object({
-			paths: Type.Array(Type.String({ description: "Local file path to attach" }), { minItems: 1, maxItems: MAX_ATTACHMENTS_PER_TURN }),
+			paths: Type.Array(Type.String({ description: "Local file path to send" }), { minItems: 1, maxItems: MAX_ATTACHMENTS_PER_TURN }),
 		}),
-		async execute(_toolCallId, params) {
-			if (!activeTelegramTurn) throw new Error("telegram_attach can only be used while replying to an active Telegram turn");
-			const added: string[] = [];
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const attachments: QueuedAttachment[] = [];
 			for (const inputPath of params.paths) {
 				const stats = await stat(inputPath);
 				if (!stats.isFile()) throw new Error(`Not a file: ${inputPath}`);
-				if (activeTelegramTurn.queuedAttachments.length >= MAX_ATTACHMENTS_PER_TURN) {
-					throw new Error(`Attachment limit reached (${MAX_ATTACHMENTS_PER_TURN})`);
-				}
-				activeTelegramTurn.queuedAttachments.push({ path: inputPath, fileName: basename(inputPath) });
-				added.push(inputPath);
+				attachments.push({ path: inputPath, fileName: basename(inputPath) });
 			}
+
+			if (activeTelegramTurn) {
+				if (activeTelegramTurn.queuedAttachments.length + attachments.length > MAX_ATTACHMENTS_PER_TURN) {
+					throw new Error(`Telegram file limit reached (${MAX_ATTACHMENTS_PER_TURN})`);
+				}
+				activeTelegramTurn.queuedAttachments.push(...attachments);
+				return {
+					content: [{ type: "text", text: `Queued ${attachments.length} Telegram file(s) to send with the final reply.` }],
+					details: { queued: true, paths: attachments.map((attachment) => attachment.path) },
+				};
+			}
+
+			const result = await sendTelegramFiles(attachments, ctx);
+			const sentCount = result.sentCount ?? 0;
+			const failedCount = result.failedCount ?? 0;
+			const text = result.sent
+				? `Sent ${sentCount || attachments.length} Telegram file(s).`
+				: sentCount > 0
+				? `Sent ${sentCount} Telegram file(s); ${failedCount} failed.`
+				: `Failed to send Telegram file(s): ${result.reason ?? "unavailable"}.`;
 			return {
-				content: [{ type: "text", text: `Queued ${added.length} Telegram attachment(s).` }],
-				details: { paths: added },
+				content: [{ type: "text", text }],
+				details: { ...result, paths: attachments.map((attachment) => attachment.path) },
 			};
 		},
 	});

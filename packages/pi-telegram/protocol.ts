@@ -103,6 +103,7 @@ export type ClientToBroker =
 	| { v: 1; type: "reload_config"; id?: string }
 	| { v: 1; type: "get_status"; id: string }
 	| { v: 1; type: "send_text"; id?: string; chatId: number; text: string; replyToMessageId?: number; linkToSession?: boolean }
+	| { v: 1; type: "send_files"; id: string; chatId?: number; attachments: QueuedAttachment[]; linkToSession?: boolean }
 	| { v: 1; type: "preview_start"; requestId: string; chatId: number }
 	| { v: 1; type: "preview_update"; requestId: string; chatId: number; text: string }
 	| {
