@@ -11,6 +11,9 @@
  *
  * Commands:
  *   /plan [description]  Toggle plan mode, or start planning with a task
+ *   /plan-approve        Approve the current plan without using UI
+ *   /plan-refine <text>  Refine the current plan without using UI
+ *   /plan-exit           Exit plan mode without using UI
  *   Ctrl+Alt+P           Toggle plan mode
  *
  * Tools (model-initiated):
@@ -127,6 +130,10 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		}
 	}
 
+	function shouldUseHeadlessControls(ctx: ExtensionContext): boolean {
+		return !ctx.hasUI || pi.getFlag("plan-headless") === true;
+	}
+
 	function updateStatus(ctx: ExtensionContext): void {
 		if (planModeEnabled) {
 			ctx.ui.setStatus("plan-mode", ctx.ui.theme.fg("warning", "⏸ plan"));
@@ -172,16 +179,66 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 
 	pi.registerMessageRenderer("plan-result", (message) => renderMarkdown(textContent(message.content)));
 
+	async function sendPlanResult(content: string): Promise<void> {
+		await pi.sendMessage(
+			{
+				customType: "plan-result",
+				content,
+				display: true,
+			},
+			{ triggerTurn: false },
+		);
+	}
+
+	function buildHeadlessControlsText(): string {
+		return `Headless controls:
+- Approve and execute: send \`/plan-approve\`.
+- Refine the plan: send \`/plan-refine <changes>\`.
+- Exit plan mode: send \`/plan-exit\`.`;
+	}
+
+	function buildPlanPreview(headless: boolean): string {
+		const lines = [
+			"📋 **HTML plan ready**",
+			"",
+			`- Plan saved to: \`${planFilePath}\``,
+		];
+
+		if (headless) {
+			lines.push("", buildHeadlessControlsText());
+		} else {
+			lines.push(
+				"- Opened in your browser.",
+				`- If it did not open, open this file manually: \`${planFilePath}\``,
+			);
+		}
+
+		return lines.join("\n");
+	}
+
+	function buildPlanMissingMessage(): string {
+		return `No HTML plan file found at \`${planFilePath}\`. The planner may not have written to the expected path. Continue planning or send \`/plan-exit\` to leave plan mode.`;
+	}
+
 	/**
-	 * After planning completes, read the HTML plan file and show the menu.
+	 * After planning completes, read the HTML plan file and present available controls.
 	 */
 	async function presentPlan(
 		ctx: ExtensionContext,
 		options: { sendPreviewMessage?: boolean; onPreview?: (preview: string) => void } = {},
 	): Promise<string | undefined> {
+		const headless = shouldUseHeadlessControls(ctx);
 		const content = readPlanFile(planFilePath);
 
 		if (!content) {
+			const missingMessage = buildPlanMissingMessage();
+
+			if (headless) {
+				options.onPreview?.(missingMessage);
+				if (options.sendPreviewMessage !== false) await sendPlanResult(missingMessage);
+				return missingMessage;
+			}
+
 			ctx.ui.notify(`No HTML plan file found at ${planFilePath}. The planner may not have written to the expected path.`, "error");
 
 			const recovery = await ctx.ui.select("HTML plan file missing — what next?", [
@@ -199,9 +256,9 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 			return;
 		}
 
-		openPlanInBrowser(planFilePath, ctx);
+		if (!headless) openPlanInBrowser(planFilePath, ctx);
 
-		const preview = `📋 **HTML plan ready**\n\n- Plan saved to: \`${planFilePath}\`\n- Opened in your browser.\n- If it did not open, open this file manually: \`${planFilePath}\``;
+		const preview = buildPlanPreview(headless);
 		options.onPreview?.(preview);
 		pi.events.emit(PI_NOTIFY_EVENT, {
 			v: 1,
@@ -215,15 +272,10 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		});
 
 		if (options.sendPreviewMessage !== false) {
-			await pi.sendMessage(
-				{
-					customType: "plan-result",
-					content: preview,
-					display: true,
-				},
-				{ triggerTurn: false },
-			);
+			await sendPlanResult(preview);
 		}
+
+		if (headless) return preview;
 
 		// Show execution menu
 		const menuOptions = ["Execute with Beads + parallel subagents", "Refine the plan", "Exit plan mode"];
@@ -255,17 +307,20 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 	/**
 	 * Execute plan with the main agent as Beads coordinator.
 	 */
-	async function executeWithBeadsCoordinator(ctx: ExtensionContext): Promise<void> {
+	function approvePlanState(ctx: ExtensionContext): string | undefined {
+		if (!planModeEnabled) return "No active plan to approve.";
+		if (!planFilePath || !readPlanFile(planFilePath)) return buildPlanMissingMessage();
+
 		planModeEnabled = false;
 		const tools = pi.getAllTools().map((t) => t.name);
 		pi.setActiveTools(tools);
 		updateStatus(ctx);
 		persistState();
+		return undefined;
+	}
 
-		pi.sendMessage(
-			{
-				customType: "plan-execute",
-				content: `${buildBeadsExecutionInstructions()}
+	function buildPlanExecutionMessage(): string {
+		return `${buildBeadsExecutionInstructions()}
 
 Coordinate execution from the main agent:
 1. Create one Bead per approved vertical slice before implementation, using the visible Vertical slices / Tasks to create section and dependency graph.
@@ -273,11 +328,37 @@ Coordinate execution from the main agent:
 3. Keep coordination in the main agent: track dependencies, update Bead status, collect worker results, run final verification, and close completed Beads.
 4. Launch worker subagents only for independent ready graph branches. Pass each worker the slice ID/title, Bead ID, plan path, files, acceptance criteria, dependencies, verification steps, and suggested skills.
 5. Use run_in_background: true for independent work and keep overlapping-file or dependency-blocked work sequential.
-6. Use pi-beads for TUI visibility while bd CLI remains the source of task state.`,
+6. Use pi-beads for TUI visibility while bd CLI remains the source of task state.`;
+	}
+
+	async function executeWithBeadsCoordinator(ctx: ExtensionContext): Promise<string> {
+		const approvalError = approvePlanState(ctx);
+		if (approvalError) {
+			ctx.ui.notify(approvalError, "error");
+			await sendPlanResult(approvalError);
+			return approvalError;
+		}
+
+		const content = buildPlanExecutionMessage();
+		await pi.sendMessage(
+			{
+				customType: "plan-execute",
+				content,
 				display: true,
 			},
 			{ triggerTurn: true },
 		);
+
+		return `Plan approved. Starting execution from \`${planFilePath}\`.`;
+	}
+
+	function refinePlan(ctx: ExtensionContext, refinement: string | undefined): string | undefined {
+		if (!planModeEnabled) return "No active plan to refine.";
+		const text = refinement?.trim();
+		if (!text) return "Usage: /plan-refine <changes>";
+		planPresentedThisAgent = false;
+		sendUserMessage(ctx, text);
+		return undefined;
 	}
 
 	function buildBeadsExecutionInstructions(): string {
@@ -533,6 +614,12 @@ Use ask_user ONLY to clarify requirements or choose between approaches BEFORE fi
 		default: false,
 	});
 
+	pi.registerFlag("plan-headless", {
+		description: "Use command-based plan approval instead of UI dialogs",
+		type: "boolean",
+		default: false,
+	});
+
 	pi.registerCommand("plan", {
 		description: "Toggle plan mode, or start planning: /plan <task description>",
 		handler: async (args, ctx) => {
@@ -550,6 +637,38 @@ Use ask_user ONLY to clarify requirements or choose between approaches BEFORE fi
 					enablePlanMode(ctx);
 				}
 			}
+		},
+	});
+
+	pi.registerCommand("plan-approve", {
+		description: "Approve the current plan and execute it without opening the approval UI",
+		handler: async (_args, ctx) => {
+			await executeWithBeadsCoordinator(ctx);
+		},
+	});
+
+	pi.registerCommand("plan-refine", {
+		description: "Refine the current plan without opening the approval UI: /plan-refine <changes>",
+		handler: async (args, ctx) => {
+			const error = refinePlan(ctx, args);
+			if (error) {
+				ctx.ui.notify(error, "warning");
+				await sendPlanResult(error);
+			}
+		},
+	});
+
+	pi.registerCommand("plan-exit", {
+		description: "Exit plan mode without opening the approval UI",
+		handler: async (_args, ctx) => {
+			if (!planModeEnabled) {
+				const message = "Plan mode is not active.";
+				ctx.ui.notify(message, "warning");
+				await sendPlanResult(message);
+				return;
+			}
+			disablePlanMode(ctx);
+			await sendPlanResult("Plan mode exited. Full access restored.");
 		},
 	});
 
@@ -661,9 +780,10 @@ ${hasAgentTool ? buildAgentFirstWorkflowInstructions() : buildIterativeWorkflowI
 		planPresentedThisAgent = false;
 	});
 
-	// After agent finishes in plan mode, present the plan and show menu
+	// After agent finishes in plan mode, present the plan controls.
 	pi.on("agent_end", async (_event, ctx) => {
-		if (!planModeEnabled || !ctx.hasUI || planPresentedThisAgent) return;
+		if (!planModeEnabled || planPresentedThisAgent) return;
+		if (!ctx.hasUI && !readPlanFile(planFilePath)) return;
 		await presentPlan(ctx);
 	});
 

@@ -20,4 +20,13 @@ describe("plan-mode workflow instructions", () => {
     expect(source).toContain("get_subagent_result using wait: true");
     expect(source).toContain("exit_plan_mode");
   });
+
+  it("supports headless plan approval and refinement controls", () => {
+    expect(source).toContain("plan-headless");
+    expect(source).toContain("Headless controls");
+    expect(source).toContain("plan-approve");
+    expect(source).toContain("plan-refine");
+    expect(source).toContain("plan-exit");
+    expect(source).not.toContain("name: \"approve_plan\"");
+  });
 });
