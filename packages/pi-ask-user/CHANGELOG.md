@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Updated `ask_user` prompt guidance and skill docs to prefer batching known related clarifications with the `questions[]` wizard instead of asking them one-by-one.
+
 ## [0.11.2](https://github.com/edlsh/pi-ask-user/releases/tag/v0.11.2) - 2026-06-03
 
 ### Changed

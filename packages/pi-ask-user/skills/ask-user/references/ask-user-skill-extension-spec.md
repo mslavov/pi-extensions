@@ -33,9 +33,10 @@ Use this protocol whenever the trigger matrix says to ask.
    - read code/docs/logs first; do not ask blindly
 3. **Summarize context**
    - prepare concise trade-off context (3–7 bullets or short paragraph)
-4. **Ask one focused question or short related wizard**
+4. **Ask a focused question or short related wizard**
    - call `ask_user` for one decision boundary at a time
-   - use `questions[]` for 1-4 closely related prompts when one answer may make later prompts optional
+   - prefer `questions[]` for 1-4 closely related prompts when multiple clarifications are already known, instead of asking one-by-one
+   - ask serial follow-ups only when new uncertainty appears after the user's response
 5. **Commit and proceed**
    - restate chosen option and implement accordingly
 
@@ -44,7 +45,7 @@ Use this protocol whenever the trigger matrix says to ask.
 - Max **2** `ask_user` attempts for the same decision boundary.
 - Attempt 1: normal structured question.
 - Attempt 2: narrower question with recommendation and explicit options.
-- A `questions[]` wizard still counts as one `ask_user` attempt.
+- A `questions[]` wizard still counts as one `ask_user` attempt and is preferred when several related clarifications are already known.
 - After attempt 2:
   - `high_stakes` / `both`: stop and report blocked.
   - `ambiguous` only: proceed only if user delegates (e.g., “your call”), using the most reversible default.
@@ -70,7 +71,7 @@ Use this protocol whenever the trigger matrix says to ask.
 
 ### Conditional wizard
 
-Use `questions[]` when prompts belong to the same decision boundary and follow-up answers may be skipped. Unanswered wizard items are returned as `null`.
+Use `questions[]` when prompts belong to the same decision boundary and should be answered in one interaction. Unanswered wizard items are returned as `null`.
 
 ```json
 {

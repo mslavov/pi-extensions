@@ -38,7 +38,7 @@ This package now ships a skill at `skills/ask-user/SKILL.md` that nudges/mandate
 The skill follows a "decision handshake" flow:
 
 1. Gather evidence and summarize context
-2. Ask one focused question via `ask_user`, or a short wizard of related questions when batching reduces interruptions
+2. Ask one focused question via `ask_user`, or batch known related clarifications in a short wizard so the user can answer them together
 3. Wait for explicit user choice
 4. Confirm the decision, then proceed
 
@@ -67,7 +67,7 @@ The registered tool name is:
 | `allowMultiple` | `boolean?` | `false` | Enable multi-select mode |
 | `allowFreeform` | `boolean?` | `true` | Add a "Type something" freeform option |
 | `allowComment` | `boolean?` | `false` | Expose a user-toggleable extra-context option in the custom UI (`ctrl+g` or the toggle row) and collect an optional comment in fallback dialogs |
-| `questions` | `AskQuestion[]?` | — | Related questions to show as a wizard. Supports 1-4 questions. Omit for the classic single-question UI. |
+| `questions` | `AskQuestion[]?` | — | Related questions to show together as a wizard. Supports 1-4 questions. Use this instead of separate `ask_user` calls when multiple related clarifications are known. Omit for the classic single-question UI. |
 | `displayMode` | `"overlay" \| "inline"?` | env var or `"overlay"` | Controls custom UI rendering: `overlay` shows the centered modal (current behavior), `inline` renders without overlay framing |
 | `overlayToggleKey` | `string?` | env var or `"alt+o"` | Shortcut for hiding/showing the overlay popup (overlay mode only). Pi-TUI key spec, e.g. `"alt+o"`, `"ctrl+shift+h"`. Pass `"off"` to disable. |
 | `commentToggleKey` | `string?` | env var or `"ctrl+g"` | Shortcut for toggling the optional comment/extra-context row when `allowComment: true`. Pass `"off"` to disable. |
@@ -92,7 +92,7 @@ The registered tool name is:
 }
 ```
 
-Multi-question wizard:
+Multi-question wizard for batching related clarifications:
 
 ```json
 {

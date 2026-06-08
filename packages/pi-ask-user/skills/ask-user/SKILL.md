@@ -1,6 +1,6 @@
 ---
 name: ask-user
-description: "You MUST use this before high-stakes architectural decisions, irreversible changes, or when requirements are ambiguous. Runs a decision handshake with the ask_user tool: summarize context, present structured options or a short related-question wizard, collect explicit user choice, then proceed."
+description: "You MUST use this before high-stakes architectural decisions, irreversible changes, or when requirements are ambiguous. Runs a decision handshake with the ask_user tool: summarize context, present structured options or batch related questions in a short wizard, collect explicit user choice, then proceed."
 metadata:
   short-description: Decision gate for ambiguity and high-stakes choices
 ---
@@ -47,8 +47,10 @@ Prepare a short neutral summary (3-7 bullets or short paragraph) covering:
 - trade-offs
 - recommendation (if any)
 
-### 4) Ask one focused question or a short related wizard
+### 4) Ask a focused question or batch related questions in a short wizard
 Call `ask_user` with one decision boundary at a time.
+
+When you already know multiple related clarifications, prefer one `questions[]` wizard over several one-by-one `ask_user` calls. Ask serial follow-ups only when new uncertainty appears after the user's response.
 
 Use the classic single-question shape when one answer resolves the boundary:
 - `question`: concrete decision prompt
@@ -82,6 +84,7 @@ Apply a strict question budget per decision boundary:
 
 - **Max 1** `ask_user` call per decision boundary in normal cases.
 - **Max 2** `ask_user` calls for the same boundary when first response is unclear/cancelled.
+- A `questions[]` wizard counts as one call and is preferred when several related clarifications are already known.
 - Never ask the same trade-off again without new evidence.
 
 Escalation ladder:
@@ -103,7 +106,7 @@ After attempt 2:
 Use:
 - “Which option should we adopt for X?”
 - “Do you want A (fast) or B (safer) for Y?”
-- `questions[]` only for a short flow of related prompts where earlier answers can make later prompts optional
+- `questions[]` for a short flow of related prompts that should be answered in one interaction
 
 Avoid:
 - broad/open prompts with no decision boundary

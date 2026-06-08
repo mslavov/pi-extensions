@@ -1896,13 +1896,14 @@ export default function(pi: ExtensionAPI) {
       name: "ask_user",
       label: "Ask User",
       description:
-         "Ask the user one question or a short wizard of up to four related questions with optional multiple-choice answers. Use this to gather information interactively. Before calling, gather context with tools (read/web/ref) and pass a short summary via the context field.",
+         "Ask the user one focused question, or batch up to four related questions into a wizard with optional multiple-choice answers. Use the questions[] wizard instead of separate one-by-one ask_user calls when multiple related clarifications are known. Before calling, gather context with tools (read/web/ref) and pass a short summary via the context field.",
       promptSnippet:
-         "Ask the user focused questions with optional multiple-choice answers to gather information interactively",
+         "Ask the user focused questions interactively, batching related questions into a wizard when possible",
       promptGuidelines: [
          "Before calling ask_user, gather context with tools (read/web/ref) and pass a short summary via the context field.",
          "Use ask_user when the user's intent is ambiguous, when a decision requires explicit user input, or when multiple valid options exist.",
-         `Ask one focused question by default; use questions[] only for related clarification batches with at most ${MAX_WIZARD_QUESTIONS} questions.`,
+         `When you already know multiple related clarifications, ask them together with questions[] in one wizard of at most ${MAX_WIZARD_QUESTIONS} questions instead of asking one-by-one.`,
+         "Use the single-question shape only when one answer resolves the decision boundary or follow-ups depend on the user's first answer.",
          "Keep each questions[] item focused and independent; do not combine unrelated or multipart prompts into one question.",
       ],
       // Block other tool calls in the same assistant turn until the user answers,
@@ -1979,7 +1980,7 @@ export default function(pi: ExtensionAPI) {
                {
                   minItems: 1,
                   maxItems: MAX_WIZARD_QUESTIONS,
-                  description: `Related questions to ask as a wizard. Limit ${MAX_WIZARD_QUESTIONS}. Omit for a single-question call.`,
+                  description: `Related questions to ask together as a wizard. Limit ${MAX_WIZARD_QUESTIONS}. Use this instead of separate ask_user calls when multiple related clarifications are known. Omit for a single-question call.`,
                },
             ),
          ),
