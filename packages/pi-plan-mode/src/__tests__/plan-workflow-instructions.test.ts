@@ -29,4 +29,11 @@ describe("plan-mode workflow instructions", () => {
     expect(source).toContain("plan-exit");
     expect(source).not.toContain("name: \"approve_plan\"");
   });
+
+  it("supports annotated plan review refinement cycles", () => {
+    expect(source).toContain("startPlanReviewServer");
+    expect(source).toContain("Opened annotated review UI");
+    expect(source).toContain("annotated plan review feedback");
+    expect(source).toContain("call exit_plan_mode again");
+  });
 });

@@ -28,6 +28,7 @@ import { pathToFileURL } from "node:url";
 import { getMarkdownTheme, type ExtensionAPI, type ExtensionContext, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { Key, Markdown, Text } from "@earendil-works/pi-tui";
+import { startPlanReviewServer, type PlanReviewDecision } from "./plan-review-server.js";
 
 const AGENT_TOOL = "Agent";
 const EXPLORE_AGENT = "Explore";
@@ -67,8 +68,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		}
 	}
 
-	function openPlanInBrowser(path: string, ctx: ExtensionContext): void {
-		const url = pathToFileURL(path).href;
+	function openUrlInBrowser(url: string, fallbackMessage: string, ctx: ExtensionContext): void {
 		let command: string;
 		let args: string[];
 
@@ -86,12 +86,24 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		try {
 			const child = spawn(command, args, { detached: true, stdio: "ignore" });
 			child.on("error", () => {
-				ctx.ui.notify(`Could not open HTML plan in a browser. Open manually: ${path}`, "warning");
+				ctx.ui.notify(fallbackMessage, "warning");
 			});
 			child.unref();
 		} catch {
-			ctx.ui.notify(`Could not open HTML plan in a browser. Open manually: ${path}`, "warning");
+			ctx.ui.notify(fallbackMessage, "warning");
 		}
+	}
+
+	function openPlanInBrowser(path: string, ctx: ExtensionContext): void {
+		openUrlInBrowser(
+			pathToFileURL(path).href,
+			`Could not open HTML plan in a browser. Open manually: ${path}`,
+			ctx,
+		);
+	}
+
+	function openReviewInBrowser(url: string, ctx: ExtensionContext): void {
+		openUrlInBrowser(url, `Could not open plan review UI. Open manually: ${url}`, ctx);
 	}
 
 	function textContent(content: unknown): string {
@@ -197,7 +209,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 - Exit plan mode: send \`/plan-exit\`.`;
 	}
 
-	function buildPlanPreview(headless: boolean): string {
+	function buildPlanPreview(headless: boolean, reviewUrl?: string): string {
 		const lines = [
 			"📋 **HTML plan ready**",
 			"",
@@ -206,6 +218,11 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 
 		if (headless) {
 			lines.push("", buildHeadlessControlsText());
+		} else if (reviewUrl) {
+			lines.push(
+				"- Opened annotated review UI in your browser.",
+				`- If it did not open, open this URL manually: ${reviewUrl}`,
+			);
 		} else {
 			lines.push(
 				"- Opened in your browser.",
@@ -218,6 +235,58 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 
 	function buildPlanMissingMessage(): string {
 		return `No HTML plan file found at \`${planFilePath}\`. The planner may not have written to the expected path. Continue planning or send \`/plan-exit\` to leave plan mode.`;
+	}
+
+	function delay(ms: number): Promise<void> {
+		return new Promise((resolve) => setTimeout(resolve, ms));
+	}
+
+	async function handleReviewDecision(ctx: ExtensionContext, decision: PlanReviewDecision): Promise<void> {
+		if (decision.action === "approve") {
+			await executeWithBeadsCoordinator(ctx, decision.feedback);
+			return;
+		}
+
+		if (decision.action === "refine") {
+			if (!planModeEnabled) {
+				ctx.ui.notify("That plan is no longer active; review feedback was ignored.", "warning");
+				return;
+			}
+			const feedback = decision.feedback?.trim();
+			if (!feedback) {
+				ctx.ui.notify("Review submitted without feedback; plan mode remains active.", "warning");
+				return;
+			}
+			planPresentedThisAgent = false;
+			sendUserMessage(ctx, feedback);
+			return;
+		}
+
+		disablePlanMode(ctx);
+	}
+
+	async function presentPlanReview(
+		ctx: ExtensionContext,
+		content: string,
+		options: { sendPreviewMessage?: boolean; onPreview?: (preview: string) => void },
+	): Promise<string> {
+		const server = await startPlanReviewServer({ planFilePath, planHtml: content });
+		openReviewInBrowser(server.url, ctx);
+
+		const preview = buildPlanPreview(false, server.url);
+		options.onPreview?.(preview);
+		if (options.sendPreviewMessage !== false) {
+			await sendPlanResult(preview);
+		}
+
+		try {
+			const decision = await server.waitForDecision();
+			await delay(500);
+			await handleReviewDecision(ctx, decision);
+			return preview;
+		} finally {
+			server.stop();
+		}
 	}
 
 	/**
@@ -256,10 +325,6 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 			return;
 		}
 
-		if (!headless) openPlanInBrowser(planFilePath, ctx);
-
-		const preview = buildPlanPreview(headless);
-		options.onPreview?.(preview);
 		pi.events.emit(PI_NOTIFY_EVENT, {
 			v: 1,
 			source: "pi-plan-mode",
@@ -270,6 +335,21 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 			dedupeKey: `plan-ready:${planFilePath}`,
 			minIntervalMs: 30_000,
 		});
+
+		if (!headless) {
+			try {
+				return await presentPlanReview(ctx, content, options);
+			} catch (error) {
+				ctx.ui.notify(
+					`Annotated plan review UI failed to start; falling back to the basic plan menu. ${error instanceof Error ? error.message : String(error)}`,
+					"warning",
+				);
+				openPlanInBrowser(planFilePath, ctx);
+			}
+		}
+
+		const preview = buildPlanPreview(headless);
+		options.onPreview?.(preview);
 
 		if (options.sendPreviewMessage !== false) {
 			await sendPlanResult(preview);
@@ -319,7 +399,14 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		return undefined;
 	}
 
-	function buildPlanExecutionMessage(): string {
+	function buildPlanExecutionMessage(reviewNotes?: string): string {
+		const notes = reviewNotes?.trim()
+			? `
+
+Reviewer implementation notes submitted with approval:
+${reviewNotes.trim()}`
+			: "";
+
 		return `${buildBeadsExecutionInstructions()}
 
 Coordinate execution from the main agent:
@@ -328,10 +415,10 @@ Coordinate execution from the main agent:
 3. Keep coordination in the main agent: track dependencies, update Bead status, collect worker results, run final verification, and close completed Beads.
 4. Launch worker subagents only for independent ready graph branches. Pass each worker the slice ID/title, Bead ID, plan path, files, acceptance criteria, dependencies, verification steps, and suggested skills.
 5. Use run_in_background: true for independent work and keep overlapping-file or dependency-blocked work sequential.
-6. Use pi-beads for TUI visibility while bd CLI remains the source of task state.`;
+6. Use pi-beads for TUI visibility while bd CLI remains the source of task state.${notes}`;
 	}
 
-	async function executeWithBeadsCoordinator(ctx: ExtensionContext): Promise<string> {
+	async function executeWithBeadsCoordinator(ctx: ExtensionContext, reviewNotes?: string): Promise<string> {
 		const approvalError = approvePlanState(ctx);
 		if (approvalError) {
 			ctx.ui.notify(approvalError, "error");
@@ -339,7 +426,7 @@ Coordinate execution from the main agent:
 			return approvalError;
 		}
 
-		const content = buildPlanExecutionMessage();
+		const content = buildPlanExecutionMessage(reviewNotes);
 		await pi.sendMessage(
 			{
 				customType: "plan-execute",
@@ -385,6 +472,10 @@ Coordinate execution from the main agent:
 		return hasAgentTool
 			? `Follow the agent-first workflow: ${EXPLORE_AGENT} context bundles, ${PLAN_WRITER_AGENT} HTML draft, ${PLAN_AGENT} vertical-slice breakdown, ${PLAN_WRITER_AGENT} finalization, then exit_plan_mode.`
 			: "Follow iterative workflow: explore codebase, interview user, and write the standalone HTML plan with visible tasks and a dependency graph incrementally.";
+	}
+
+	function buildReviewFeedbackInstructions(): string {
+		return "If the user submits annotated plan review feedback, revise the same HTML plan file directly, address each quoted comment or global note, and call exit_plan_mode again when the updated plan is ready for review.";
 	}
 
 	function buildPlanFileStructureInstructions(): string {
@@ -730,7 +821,8 @@ Use ask_user ONLY to clarify requirements or choose between approaches BEFORE fi
 Plan mode still active (see full instructions earlier in conversation). Direct write/edit tool calls are limited to the HTML plan file (\`${planFilePath}\`). Do not mutate Beads before approval.
 ${planWorkflowReminder()}
 End turns with ask_user (for clarifications) or by calling the exit_plan_mode tool (for plan approval).
-Do not ask about plan approval via text or ask_user — call the exit_plan_mode tool instead.`,
+Do not ask about plan approval via text or ask_user — call the exit_plan_mode tool instead.
+${buildReviewFeedbackInstructions()}`,
 					display: false,
 				},
 			};
@@ -751,6 +843,8 @@ You are in plan mode. Keep implementation work out of plan mode; direct write/ed
 ## HTML Plan File
 ${planExistsInfo}
 Build your standalone HTML plan incrementally by writing to or editing this file. This is the ONLY file you may edit.
+
+${buildReviewFeedbackInstructions()}
 
 ${hasAgentTool ? buildAgentFirstWorkflowInstructions() : buildIterativeWorkflowInstructions()}${planDescription ? `\n\n## Task\n${planDescription}` : ""}`,
 				display: false,
