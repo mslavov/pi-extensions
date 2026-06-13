@@ -1,0 +1,31 @@
+{
+	"name": "pi-casper",
+	"version": "0.1.0",
+	"private": false,
+	"description": "Slack channel bridge extension for pi",
+	"type": "module",
+	"keywords": ["pi-package", "pi", "slack", "socket-mode", "extension"],
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/badlogic/pi-casper.git"
+	},
+	"homepage": "https://github.com/badlogic/pi-casper",
+	"bugs": {
+		"url": "https://github.com/badlogic/pi-casper/issues"
+	},
+	"pi": {
+		"extensions": ["./index.ts"]
+	},
+	"scripts": {
+		"check": "tsc --noEmit",
+		"build": "echo 'pi compiles TS directly'",
+		"clean": "echo 'nothing to clean'"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-ai": "*",
+		"@earendil-works/pi-agent-core": "*",
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*"
+	}
+}

@@ -61,6 +61,16 @@
         "@earendil-works/pi-tui": "*",
       },
     },
+    "packages/pi-casper": {
+      "name": "pi-casper",
+      "version": "0.1.0",
+      "peerDependencies": {
+        "@earendil-works/pi-agent-core": "*",
+        "@earendil-works/pi-ai": "*",
+        "@earendil-works/pi-coding-agent": "*",
+        "@earendil-works/pi-tui": "*",
+      },
+    },
     "packages/pi-claude-code": {
       "name": "pi-claude-code",
       "version": "0.1.0",
@@ -972,6 +982,8 @@
     "pi-background-bash": ["pi-background-bash@workspace:packages/pi-background-bash"],
 
     "pi-beads": ["pi-beads@workspace:packages/pi-beads"],
+
+    "pi-casper": ["pi-casper@workspace:packages/pi-casper"],
 
     "pi-claude-code": ["pi-claude-code@workspace:packages/pi-claude-code"],
 
