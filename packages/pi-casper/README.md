@@ -33,6 +33,7 @@ Or configure the app manually:
 3. Add bot token scopes:
    - `app_mentions:read`
    - `channels:history`
+   - `channels:join`
    - `channels:manage`
    - `channels:read`
    - `channels:write.invites`

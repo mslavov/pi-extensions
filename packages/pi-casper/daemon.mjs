@@ -34,6 +34,7 @@ const sessions = new Map();
 const streamMessages = new Map();
 const toolMessages = new Map();
 const channelEnsures = new Map();
+const joinedChannels = new Set();
 
 function now() {
 	return Date.now();
@@ -354,6 +355,7 @@ async function ensureSessionChannelInner(session) {
 		delete mapping.archivedAt;
 		state.channels[mapping.channelId] = session.sessionId;
 		pruneChannelAliases(session.sessionId, mapping.channelId);
+		await ensureBotInChannel(mapping.channelId);
 		if (nameChanged) await maybeRenameSessionChannel(session, mapping);
 		if (topicChanged) await setChannelTopic(session, mapping).catch((error) => log(`channel topic failed: ${errorMessage(error)}`));
 		await writeState();
@@ -376,11 +378,28 @@ async function ensureSessionChannelInner(session) {
 	state.sessions[session.sessionId] = mapping;
 	state.channels[mapping.channelId] = session.sessionId;
 	pruneChannelAliases(session.sessionId, mapping.channelId);
+	await ensureBotInChannel(mapping.channelId);
 	await inviteConfiguredUser(mapping.channelId);
 	await setChannelTopic(session, mapping).catch((error) => log(`channel topic failed: ${errorMessage(error)}`));
 	await postSlackMessage(mapping.channelId, sessionConnectedBlocks(session), `pi session connected: ${formatSessionLabel(session)}`).catch((error) => log(`welcome post failed: ${errorMessage(error)}`));
 	await writeState();
 	return mapping;
+}
+
+async function ensureBotInChannel(channelId) {
+	if (joinedChannels.has(channelId)) return;
+	if (config.privateChannels === true) return;
+	try {
+		await callSlack("conversations.join", { channel: channelId });
+		joinedChannels.add(channelId);
+	} catch (error) {
+		const message = errorMessage(error);
+		if (message.includes("already_in_channel")) {
+			joinedChannels.add(channelId);
+			return;
+		}
+		await log(`channel join failed: ${message}`);
+	}
 }
 
 function pruneChannelAliases(sessionId, activeChannelId) {
@@ -571,12 +590,30 @@ function toolKey(sessionId, toolCallId) {
 	return `${sessionId}:${toolCallId}`;
 }
 
-async function postSlackMessage(channel, blocks, text) {
-	return callSlack("chat.postMessage", { channel, text: clip(stripFormatting(text), 3000), blocks: capBlocks(blocks), unfurl_links: false, unfurl_media: false });
+async function postSlackMessage(channel, blocks, text, retriedJoin = false) {
+	try {
+		return await callSlack("chat.postMessage", { channel, text: clip(stripFormatting(text), 3000), blocks: capBlocks(blocks), unfurl_links: false, unfurl_media: false });
+	} catch (error) {
+		if (!retriedJoin && errorMessage(error).includes("not_in_channel")) {
+			joinedChannels.delete(channel);
+			await ensureBotInChannel(channel);
+			return postSlackMessage(channel, blocks, text, true);
+		}
+		throw error;
+	}
 }
 
-async function updateSlackMessage(channel, ts, blocks, text) {
-	return callSlack("chat.update", { channel, ts, text: clip(stripFormatting(text), 3000), blocks: capBlocks(blocks) });
+async function updateSlackMessage(channel, ts, blocks, text, retriedJoin = false) {
+	try {
+		return await callSlack("chat.update", { channel, ts, text: clip(stripFormatting(text), 3000), blocks: capBlocks(blocks) });
+	} catch (error) {
+		if (!retriedJoin && errorMessage(error).includes("not_in_channel")) {
+			joinedChannels.delete(channel);
+			await ensureBotInChannel(channel);
+			return updateSlackMessage(channel, ts, blocks, text, true);
+		}
+		throw error;
+	}
 }
 
 function capBlocks(blocks) {
