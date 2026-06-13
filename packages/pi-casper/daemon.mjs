@@ -33,6 +33,7 @@ let lastError;
 const sessions = new Map();
 const streamMessages = new Map();
 const toolMessages = new Map();
+const channelEnsures = new Map();
 
 function now() {
 	return Date.now();
@@ -326,8 +327,20 @@ function updateSessionFromMessage(client, message) {
 
 async function ensureSessionChannel(session) {
 	if (!configured()) return undefined;
+	const existing = channelEnsures.get(session.sessionId);
+	if (existing) return existing;
+	const promise = ensureSessionChannelInner(session).finally(() => {
+		if (channelEnsures.get(session.sessionId) === promise) channelEnsures.delete(session.sessionId);
+	});
+	channelEnsures.set(session.sessionId, promise);
+	return promise;
+}
+
+async function ensureSessionChannelInner(session) {
 	let mapping = state.sessions[session.sessionId];
 	if (mapping?.channelId) {
+		const topicChanged = mapping.cwd !== session.cwd || mapping.sessionFile !== session.sessionFile;
+		const nameChanged = mapping.sessionName !== session.sessionName;
 		mapping.cwd = session.cwd;
 		mapping.sessionFile = session.sessionFile;
 		mapping.sessionName = session.sessionName;
@@ -336,9 +349,13 @@ async function ensureSessionChannel(session) {
 			await callSlack("conversations.unarchive", { channel: mapping.channelId }).catch((error) => log(`channel unarchive failed: ${errorMessage(error)}`));
 		}
 		mapping.state = "active";
+		delete mapping.closeReason;
+		delete mapping.closedAt;
+		delete mapping.archivedAt;
 		state.channels[mapping.channelId] = session.sessionId;
-		await maybeRenameSessionChannel(session, mapping);
-		await setChannelTopic(session, mapping).catch((error) => log(`channel topic failed: ${errorMessage(error)}`));
+		pruneChannelAliases(session.sessionId, mapping.channelId);
+		if (nameChanged) await maybeRenameSessionChannel(session, mapping);
+		if (topicChanged) await setChannelTopic(session, mapping).catch((error) => log(`channel topic failed: ${errorMessage(error)}`));
 		await writeState();
 		return mapping;
 	}
@@ -358,11 +375,18 @@ async function ensureSessionChannel(session) {
 	};
 	state.sessions[session.sessionId] = mapping;
 	state.channels[mapping.channelId] = session.sessionId;
+	pruneChannelAliases(session.sessionId, mapping.channelId);
 	await inviteConfiguredUser(mapping.channelId);
 	await setChannelTopic(session, mapping).catch((error) => log(`channel topic failed: ${errorMessage(error)}`));
 	await postSlackMessage(mapping.channelId, sessionConnectedBlocks(session), `pi session connected: ${formatSessionLabel(session)}`).catch((error) => log(`welcome post failed: ${errorMessage(error)}`));
 	await writeState();
 	return mapping;
+}
+
+function pruneChannelAliases(sessionId, activeChannelId) {
+	for (const [channelId, mappedSessionId] of Object.entries(state.channels)) {
+		if (mappedSessionId === sessionId && channelId !== activeChannelId) delete state.channels[channelId];
+	}
 }
 
 async function createSessionChannel(session) {
