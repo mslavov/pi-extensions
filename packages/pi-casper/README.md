@@ -20,7 +20,13 @@ To replace `pi-telegram`, remove that package from your pi settings and install 
 
 ## Slack app setup
 
-Create a Slack app in the workspace where you want Casper to run.
+Create a Slack app in the workspace where you want Casper to run. You can import:
+
+```text
+packages/pi-casper/slack-app-manifest.json
+```
+
+Or configure the app manually:
 
 1. Enable **Socket Mode**.
 2. Create an app-level token with `connections:write` (`xapp-...`).
@@ -29,6 +35,7 @@ Create a Slack app in the workspace where you want Casper to run.
    - `channels:history`
    - `channels:manage`
    - `channels:read`
+   - `channels:write.invites`
    - `chat:write`
    - `files:read`
 4. Subscribe to bot events:
