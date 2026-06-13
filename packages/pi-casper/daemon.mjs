@@ -143,13 +143,18 @@ function configured() {
 
 async function callSlack(method, body = {}, token = config.botToken, retriedRateLimit = false) {
 	if (!token) throw new Error(`Slack token is not configured for ${method}`);
+	const formBody = new URLSearchParams();
+	for (const [key, value] of Object.entries(body)) {
+		if (value === undefined) continue;
+		formBody.set(key, typeof value === "string" ? value : JSON.stringify(value));
+	}
 	const response = await fetch(`https://slack.com/api/${method}`, {
 		method: "POST",
 		headers: {
 			authorization: `Bearer ${token}`,
-			"content-type": "application/json; charset=utf-8",
+			"content-type": "application/x-www-form-urlencoded",
 		},
-		body: JSON.stringify(body),
+		body: formBody,
 	});
 	if (response.status === 429 && !retriedRateLimit) {
 		const retryAfter = Number(response.headers.get("retry-after") || "1");
@@ -340,6 +345,7 @@ async function ensureSessionChannel(session) {
 async function ensureSessionChannelInner(session) {
 	let mapping = state.sessions[session.sessionId];
 	if (mapping?.channelId) {
+		await repairMappedChannel(session, mapping);
 		const topicChanged = mapping.cwd !== session.cwd || mapping.sessionFile !== session.sessionFile;
 		const nameChanged = mapping.sessionName !== session.sessionName;
 		mapping.cwd = session.cwd;
@@ -384,6 +390,35 @@ async function ensureSessionChannelInner(session) {
 	await postSlackMessage(mapping.channelId, sessionConnectedBlocks(session), `pi session connected: ${formatSessionLabel(session)}`).catch((error) => log(`welcome post failed: ${errorMessage(error)}`));
 	await writeState();
 	return mapping;
+}
+
+async function repairMappedChannel(session, mapping) {
+	const info = await getChannelInfo(mapping.channelId).catch(() => undefined);
+	if (!info?.is_archived) return;
+	const replacement = await findReusableChannelByName(mapping.channelName || channelNameForSession(session));
+	if (!replacement) return;
+	delete state.channels[mapping.channelId];
+	mapping.channelId = replacement.id;
+	mapping.channelName = replacement.name || mapping.channelName;
+	state.channels[mapping.channelId] = session.sessionId;
+	joinedChannels.delete(mapping.channelId);
+	if (replacement.is_member) joinedChannels.add(mapping.channelId);
+}
+
+async function getChannelInfo(channelId) {
+	const result = await callSlack("conversations.info", { channel: channelId });
+	return result.channel;
+}
+
+async function findReusableChannelByName(channelName) {
+	const result = await callSlack("conversations.list", {
+		types: config.privateChannels === true ? "private_channel" : "public_channel",
+		exclude_archived: false,
+		limit: 200,
+	});
+	const channels = Array.isArray(result.channels) ? result.channels : [];
+	return channels.find((channel) => channel.name === channelName && !channel.is_archived && channel.is_member)
+		?? channels.find((channel) => channel.name === channelName && !channel.is_archived);
 }
 
 async function ensureBotInChannel(channelId) {
