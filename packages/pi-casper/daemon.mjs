@@ -17,6 +17,7 @@ import {
 	SettingsManager,
 	defineTool,
 } from "@earendil-works/pi-coding-agent";
+import { blocksToPlainText, markdownToBlocks } from "markdown-to-slack-blocks";
 import { Type } from "typebox";
 
 const CASPER_DIR = join(homedir(), ".pi", "agent", "extensions", "casper");
@@ -33,6 +34,7 @@ const SESSION_STALE_MS = 30_000;
 const SESSION_SWEEP_MS = 10_000;
 const SLACK_SECTION_TEXT_LIMIT = 2900;
 const SLACK_BLOCK_LIMIT = 48;
+const SLACK_MAX_FIELDS_PER_SECTION = 10;
 const TEXT_CLIP_LIMIT = 24_000;
 const COMMUNICATION_TEXT_LIMIT = 1000;
 const COMMUNICATION_AGENT_TOOL_NAMES = ["slack_get_status", "slack_send_to_session", "slack_control_session"];
@@ -1144,10 +1146,11 @@ async function updateAssistantTurnMessage(client, channel, forwarded, final) {
 		assistantTurnMessages.delete(key);
 		return false;
 	}
+	const rendered = renderAssistantTurn(existing);
 	if (existing.ts) {
-		await updateSlackMessage(existing.channel, existing.ts, assistantTurnBlocks(existing), fallbackTextForAssistantTurn(existing));
+		await updateSlackMessage(existing.channel, existing.ts, rendered.blocks, rendered.text, false, rendered.fallbackBlocks);
 	} else {
-		const posted = await postSlackMessage(existing.channel, assistantTurnBlocks(existing), fallbackTextForAssistantTurn(existing));
+		const posted = await postSlackMessage(existing.channel, rendered.blocks, rendered.text, false, rendered.fallbackBlocks);
 		existing.ts = posted.ts;
 	}
 	assistantTurnMessages.delete(key);
@@ -1763,14 +1766,38 @@ function parseJson(value) {
 	}
 }
 
-async function postSlackMessage(channel, blocks, text, retriedJoin = false) {
+async function postSlackMessage(channel, blocks, text, retriedJoin = false, fallbackBlocks) {
 	try {
 		return await callSlack("chat.postMessage", { channel, text: clip(stripFormatting(text), 3000), blocks: capBlocks(blocks), unfurl_links: false, unfurl_media: false });
 	} catch (error) {
-		if (!retriedJoin && errorMessage(error).includes("not_in_channel")) {
+		const message = errorMessage(error);
+		if (!retriedJoin && message.includes("not_in_channel")) {
 			joinedChannels.delete(channel);
 			await ensureBotInChannel(channel);
-			return postSlackMessage(channel, blocks, text, true);
+			return postSlackMessage(channel, blocks, text, true, fallbackBlocks);
+		}
+		if (fallbackBlocks && isSlackBlockRejection(message)) {
+			await log(`Slack block render rejected, falling back to text blocks: ${message}`);
+			try {
+				return await postSlackMessage(channel, fallbackBlocks, text, retriedJoin);
+			} catch (fallbackError) {
+				if (isSlackBlockRejection(errorMessage(fallbackError))) return postSlackTextOnly(channel, text, retriedJoin);
+				throw fallbackError;
+			}
+		}
+		throw error;
+	}
+}
+
+async function postSlackTextOnly(channel, text, retriedJoin = false) {
+	try {
+		return await callSlack("chat.postMessage", { channel, text: clip(stripFormatting(text), 3000), unfurl_links: false, unfurl_media: false });
+	} catch (error) {
+		const message = errorMessage(error);
+		if (!retriedJoin && message.includes("not_in_channel")) {
+			joinedChannels.delete(channel);
+			await ensureBotInChannel(channel);
+			return postSlackTextOnly(channel, text, true);
 		}
 		throw error;
 	}
@@ -1830,17 +1857,52 @@ async function postSlackEphemeral(channel, user, blocks, text, retriedJoin = fal
 	}
 }
 
-async function updateSlackMessage(channel, ts, blocks, text, retriedJoin = false) {
+async function updateSlackMessage(channel, ts, blocks, text, retriedJoin = false, fallbackBlocks) {
 	try {
 		return await callSlack("chat.update", { channel, ts, text: clip(stripFormatting(text), 3000), blocks: capBlocks(blocks) });
 	} catch (error) {
-		if (!retriedJoin && errorMessage(error).includes("not_in_channel")) {
+		const message = errorMessage(error);
+		if (!retriedJoin && message.includes("not_in_channel")) {
 			joinedChannels.delete(channel);
 			await ensureBotInChannel(channel);
-			return updateSlackMessage(channel, ts, blocks, text, true);
+			return updateSlackMessage(channel, ts, blocks, text, true, fallbackBlocks);
+		}
+		if (fallbackBlocks && isSlackBlockRejection(message)) {
+			await log(`Slack block update rejected, falling back to text blocks: ${message}`);
+			try {
+				return await updateSlackMessage(channel, ts, fallbackBlocks, text, retriedJoin);
+			} catch (fallbackError) {
+				if (isSlackBlockRejection(errorMessage(fallbackError))) return updateSlackTextOnly(channel, ts, text, retriedJoin);
+				throw fallbackError;
+			}
 		}
 		throw error;
 	}
+}
+
+async function updateSlackTextOnly(channel, ts, text, retriedJoin = false) {
+	try {
+		return await callSlack("chat.update", { channel, ts, text: clip(stripFormatting(text), 3000), blocks: [] });
+	} catch (error) {
+		const message = errorMessage(error);
+		if (!retriedJoin && message.includes("not_in_channel")) {
+			joinedChannels.delete(channel);
+			await ensureBotInChannel(channel);
+			return updateSlackTextOnly(channel, ts, text, true);
+		}
+		throw error;
+	}
+}
+
+function isSlackBlockRejection(message) {
+	const text = String(message || "").toLowerCase();
+	return text.includes("invalid_blocks")
+		|| text.includes("msg_blocks_too_long")
+		|| text.includes("too_many_blocks")
+		|| text.includes("block_id_too_long")
+		|| text.includes("json-pointer:/blocks")
+		|| text.includes("invalid additional property")
+		|| (text.includes("block") && (text.includes("too_long") || text.includes("too long") || text.includes("limit") || text.includes("size")));
 }
 
 function capBlocks(blocks) {
@@ -1868,7 +1930,49 @@ function shouldPostAssistantTurn(entry) {
 	return false;
 }
 
-function assistantTurnBlocks(entry) {
+function renderAssistantTurn(entry) {
+	const markdown = fallbackTextForAssistantTurn(entry);
+	const fallbackBlocks = assistantTurnTextBlocks(entry);
+	try {
+		const blocks = sanitizeRenderedMarkdownBlocks(markdownToBlocks(markdown));
+		if (blocks.length === 0) return { text: markdown || "Response ready", blocks: fallbackBlocks, fallbackBlocks };
+		return {
+			text: fallbackTextFromMarkdownBlocks(blocks, markdown),
+			blocks,
+			fallbackBlocks,
+		};
+	} catch (error) {
+		void log(`markdown render failed, falling back to text blocks: ${errorMessage(error)}`);
+		return { text: markdown || "Response ready", blocks: fallbackBlocks, fallbackBlocks };
+	}
+}
+
+function sanitizeRenderedMarkdownBlocks(blocks) {
+	const result = [];
+	for (const block of Array.isArray(blocks) ? blocks : []) {
+		if (block?.type === "section" && Array.isArray(block.fields) && block.fields.length > SLACK_MAX_FIELDS_PER_SECTION) {
+			for (let index = 0; index < block.fields.length; index += SLACK_MAX_FIELDS_PER_SECTION) {
+				const fields = block.fields.slice(index, index + SLACK_MAX_FIELDS_PER_SECTION);
+				result.push(index === 0 ? { ...block, fields } : { type: "section", fields });
+			}
+		} else {
+			result.push(block);
+		}
+	}
+	return capBlocks(result);
+}
+
+function fallbackTextFromMarkdownBlocks(blocks, markdown) {
+	try {
+		const text = blocksToPlainText(blocks).trim();
+		if (text) return text;
+	} catch (error) {
+		void log(`markdown fallback text failed: ${errorMessage(error)}`);
+	}
+	return markdown || "Response ready";
+}
+
+function assistantTurnTextBlocks(entry) {
 	const blocks = [];
 	for (const message of entry.messages.values()) {
 		appendMessageContentBlocks(blocks, message && typeof message === "object" ? message : {});

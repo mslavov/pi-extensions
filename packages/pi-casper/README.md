@@ -82,6 +82,7 @@ Check status with:
 - Each persisted local pi session is mapped to one Slack channel.
 - The mapping and channel state live in `broker-state.json`.
 - Messages from pi are transformed into Slack Block Kit blocks and posted automatically.
+- Final assistant replies are rendered from Markdown to Slack Block Kit blocks. If Markdown rendering or Slack block validation fails, Casper falls back to plain text section blocks.
 - Messages typed in a mapped Slack channel are delivered to that pi session as regular user input.
 - Messages in a mapped channel whose local session is disconnected are handled by Casper's broker-owned communication agent.
 - Messages in unmapped channels are handled by the communication agent when Slack delivers the event to Casper, such as in channels where the bot is present or app mentions are subscribed.

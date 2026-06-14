@@ -22,6 +22,9 @@
 		"build": "echo 'pi compiles TS directly'",
 		"clean": "echo 'nothing to clean'"
 	},
+	"dependencies": {
+		"markdown-to-slack-blocks": "1.5.0"
+	},
 	"peerDependencies": {
 		"@earendil-works/pi-ai": "*",
 		"@earendil-works/pi-agent-core": "*",
