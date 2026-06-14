@@ -1299,6 +1299,11 @@ async function renderPlanPdf(planFilePath, planId) {
 }
 
 async function uploadSlackFile(channel, filePath, filename, title) {
+	const uploaded = await uploadSlackFileDetailed(channel, filePath, filename, title);
+	return uploaded.fileName;
+}
+
+async function uploadSlackFileDetailed(channel, filePath, filename, title, comment) {
 	const size = (await stat(filePath)).size;
 	const upload = await callSlack("files.getUploadURLExternal", { filename, length: size });
 	const body = await readFile(filePath);
@@ -1307,8 +1312,37 @@ async function uploadSlackFile(channel, filePath, filename, title) {
 	await callSlack("files.completeUploadExternal", {
 		channel_id: channel,
 		files: [{ id: upload.file_id, title }],
+		initial_comment: comment ? clip(comment, 1000) : undefined,
 	});
-	return filename;
+	return { fileId: upload.file_id, fileName: filename, title, size };
+}
+
+async function handleUploadFileRequest(client, message) {
+	if (!message.id) return;
+	try {
+		if (!client.sessionId || message.sessionId !== client.sessionId) throw new Error("Upload request does not match the authenticated session.");
+		const filePath = typeof message.path === "string" ? message.path.trim() : "";
+		if (!filePath) throw new Error("Upload path is required.");
+		assertSafeUploadPath(filePath);
+		const info = await stat(filePath);
+		if (!info.isFile()) throw new Error(`Not a file: ${filePath}`);
+		const mapping = await ensureSessionChannel(client);
+		if (!mapping?.channelId) throw new Error("This session does not have a Slack channel.");
+		const fileName = sanitizeFileName(basename(filePath));
+		const title = clip(String(message.title || fileName).trim() || fileName, 200);
+		const comment = typeof message.comment === "string" && message.comment.trim() ? message.comment.trim() : undefined;
+		const uploaded = await uploadSlackFileDetailed(mapping.channelId, filePath, fileName, title, comment);
+		respond(client, message.id, true, { uploaded: true, channelId: mapping.channelId, ...uploaded });
+	} catch (error) {
+		respond(client, message.id, false, undefined, errorMessage(error));
+	}
+}
+
+function assertSafeUploadPath(path) {
+	const name = basename(path).toLowerCase();
+	if (name === ".env" || name.startsWith(".env.")) throw new Error("Refusing to upload environment files.");
+	if (/\.(pem|key|p12|pfx|crt|cer|der)$/i.test(name)) throw new Error("Refusing to upload credential files.");
+	if (/id_(rsa|dsa|ecdsa|ed25519)$/i.test(name)) throw new Error("Refusing to upload private key files.");
 }
 
 async function maybeAttachPublicReviewUrl(review) {
@@ -2350,6 +2384,10 @@ async function handleClientMessage(client, message) {
 	}
 	if (message.type === "get_status") {
 		respond(client, message.id, true, buildStatus());
+		return;
+	}
+	if (message.type === "upload_file") {
+		await handleUploadFileRequest(client, message);
 		return;
 	}
 	if (message.type === "plan_action_result") {

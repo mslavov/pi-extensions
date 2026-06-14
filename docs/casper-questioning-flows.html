@@ -1,0 +1,591 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Casper Slack Questioning Flows</title>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --paper: #f5f5f5;
+      --paper-2: #ececec;
+      --ink: #2d3142;
+      --muted: #4f5d75;
+      --soft: #7a8399;
+      --rule: rgba(45,49,66,0.12);
+      --rule-solid: #bfc0c0;
+      --accent: #eb6c36;
+      --accent-tint: rgba(235,108,54,0.08);
+      --link: #2e5aa8;
+      --white: #ffffff;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: "Geist", system-ui, sans-serif;
+      line-height: 1.5;
+    }
+
+    main {
+      width: min(1120px, calc(100vw - 48px));
+      margin: 48px auto 72px;
+    }
+
+    header {
+      max-width: 840px;
+      margin-bottom: 40px;
+    }
+
+    .eyebrow {
+      margin: 0 0 8px;
+      color: var(--soft);
+      font: 500 12px/1.2 "Geist Mono", monospace;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }
+
+    h1, h2, h3 {
+      color: var(--ink);
+      margin: 0;
+      font-weight: 400;
+    }
+
+    h1 {
+      font-family: "Instrument Serif", serif;
+      font-size: 48px;
+      line-height: 1;
+      margin-bottom: 16px;
+    }
+
+    h2 {
+      font-family: "Instrument Serif", serif;
+      font-size: 32px;
+      line-height: 1.1;
+      margin-bottom: 12px;
+    }
+
+    h3 {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+
+    p { margin: 0 0 16px; }
+
+    code {
+      font-family: "Geist Mono", monospace;
+      font-size: 0.92em;
+      background: rgba(45,49,66,0.06);
+      border: 1px solid var(--rule);
+      border-radius: 4px;
+      padding: 1px 4px;
+    }
+
+    .subtitle {
+      color: var(--muted);
+      font-size: 18px;
+      max-width: 780px;
+    }
+
+    section {
+      margin-top: 56px;
+    }
+
+    .diagram {
+      margin: 24px 0 24px;
+      overflow-x: auto;
+      border-top: 1px solid var(--rule);
+      border-bottom: 1px solid var(--rule);
+      padding: 24px 0;
+    }
+
+    svg {
+      display: block;
+      width: 100%;
+      min-width: 920px;
+      height: auto;
+      font-family: "Geist", system-ui, sans-serif;
+    }
+
+    .cards {
+      display: grid;
+      grid-template-columns: 1.08fr 1fr 0.92fr;
+      gap: 16px;
+      margin-top: 20px;
+    }
+
+    .card {
+      background: var(--white);
+      border: 1px solid var(--rule);
+      border-radius: 6px;
+      padding: 20px;
+    }
+
+    .card ul { margin: 8px 0 0; padding-left: 20px; }
+    .card li { margin: 6px 0; color: var(--muted); }
+
+    .dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent);
+      margin-right: 8px;
+      vertical-align: 1px;
+    }
+
+    .dot.muted { background: var(--muted); }
+    .dot.link { background: var(--link); }
+
+    .table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--white);
+      border: 1px solid var(--rule);
+      border-radius: 6px;
+      overflow: hidden;
+      display: table;
+    }
+
+    .table th, .table td {
+      text-align: left;
+      vertical-align: top;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--rule);
+    }
+
+    .table th {
+      font: 600 12px/1.2 "Geist Mono", monospace;
+      color: var(--soft);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .table tr:last-child td { border-bottom: 0; }
+
+    footer {
+      margin-top: 64px;
+      padding-top: 16px;
+      border-top: 1px solid var(--rule);
+      color: var(--soft);
+      font: 12px/1.5 "Geist Mono", monospace;
+    }
+
+    .svg-title { font: 600 12px/1.2 "Geist", sans-serif; fill: var(--ink); }
+    .svg-sub { font: 400 8px/1.2 "Geist Mono", monospace; fill: var(--soft); }
+    .svg-tag { font: 500 8px/1.2 "Geist Mono", monospace; letter-spacing: 0.10em; text-transform: uppercase; }
+    .svg-label { font: 500 8px/1.2 "Geist Mono", monospace; letter-spacing: 0.06em; fill: var(--soft); }
+    .svg-note { font: italic 16px/1.2 "Instrument Serif", serif; fill: var(--muted); }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <p class="eyebrow">Casper / Slack / Pi</p>
+    <h1>How Plan Mode and ask_user reach Slack</h1>
+    <p class="subtitle">Two different local extension APIs share the same transport: <code>pi-casper</code> listens inside the Pi session, forwards structured events to a broker daemon over a local socket, and the daemon owns all Slack Socket Mode and Web API calls.</p>
+  </header>
+
+  <section>
+    <p class="eyebrow">Architecture</p>
+    <h2>The shared bridge</h2>
+    <p>Neither the coding agent nor normal extensions get Slack tools. <code>pi-casper</code> is the only local extension that talks to the Casper daemon, and the daemon is the only process that talks to Slack. Plan review and <code>ask_user</code> differ mainly in which extension owns the pending local decision.</p>
+
+    <div class="diagram" aria-label="Casper bridge architecture diagram">
+      <svg viewBox="0 0 960 444" role="img">
+        <defs>
+          <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
+          <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#eb6c36"/></marker>
+          <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
+        </defs>
+        <rect width="960" height="444" fill="#f5f5f5"/>
+
+        <!-- Boundaries -->
+        <rect x="36" y="56" width="444" height="252" rx="8" fill="transparent" stroke="rgba(235,108,54,0.50)" stroke-dasharray="4,4"/>
+        <rect x="52" y="48" width="124" height="16" fill="#f5f5f5"/>
+        <text x="56" y="60" class="svg-tag" fill="#eb6c36">LOCAL PI PROCESS</text>
+        <rect x="528" y="56" width="172" height="252" rx="8" fill="transparent" stroke="rgba(45,49,66,0.20)" stroke-dasharray="4,3"/>
+        <rect x="548" y="48" width="112" height="16" fill="#f5f5f5"/>
+        <text x="552" y="60" class="svg-tag" fill="#7a8399">DAEMON PROCESS</text>
+        <rect x="744" y="56" width="172" height="252" rx="8" fill="transparent" stroke="rgba(45,49,66,0.20)" stroke-dasharray="4,3"/>
+        <rect x="768" y="48" width="96" height="16" fill="#f5f5f5"/>
+        <text x="772" y="60" class="svg-tag" fill="#7a8399">SLACK CLOUD</text>
+
+        <!-- Arrows behind boxes -->
+        <path d="M196 128 H264" stroke="#eb6c36" stroke-width="1.2" marker-end="url(#arrow-accent)" fill="none"/>
+        <rect x="216" y="116" width="28" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="230" y="125" class="svg-label" text-anchor="middle">READY</text>
+        <path d="M196 232 H264" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)" fill="none"/>
+        <rect x="212" y="220" width="36" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="230" y="229" class="svg-label" text-anchor="middle">WAIT</text>
+        <path d="M424 128 H556" stroke="#eb6c36" stroke-width="1.2" marker-end="url(#arrow-accent)" fill="none"/>
+        <rect x="464" y="116" width="52" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="490" y="125" class="svg-label" text-anchor="middle">PLAN_READY</text>
+        <path d="M424 232 H556" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)" fill="none"/>
+        <rect x="460" y="220" width="60" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="490" y="229" class="svg-label" text-anchor="middle">TOOL_WAITING</text>
+        <path d="M672 152 H780" stroke="#2e5aa8" stroke-width="1" marker-end="url(#arrow-link)" fill="none"/>
+        <rect x="696" y="140" width="60" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="726" y="149" class="svg-label" text-anchor="middle">POST CARD</text>
+        <path d="M780 248 H672" stroke="#2e5aa8" stroke-width="1" marker-end="url(#arrow-link)" fill="none"/>
+        <rect x="692" y="236" width="68" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="726" y="245" class="svg-label" text-anchor="middle">INTERACTIVE</text>
+        <path d="M556 264 H424" stroke="#4f5d75" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#arrow)" fill="none"/>
+        <rect x="456" y="252" width="68" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="490" y="261" class="svg-label" text-anchor="middle">ACTION RESULT</text>
+
+        <!-- Nodes -->
+        <rect x="72" y="92" width="124" height="72" rx="6" fill="#f5f5f5"/>
+        <rect x="72" y="92" width="124" height="72" rx="6" fill="rgba(235,108,54,0.08)" stroke="#eb6c36"/>
+        <rect x="80" y="100" width="36" height="12" rx="2" fill="transparent" stroke="rgba(235,108,54,0.40)"/>
+        <text x="98" y="109" class="svg-tag" fill="#eb6c36" text-anchor="middle">PLAN</text>
+        <text x="134" y="132" class="svg-title" text-anchor="middle">pi-plan-mode</text>
+        <text x="134" y="148" class="svg-sub" text-anchor="middle">external plan bridge</text>
+
+        <rect x="72" y="196" width="124" height="72" rx="6" fill="#f5f5f5"/>
+        <rect x="72" y="196" width="124" height="72" rx="6" fill="#ffffff" stroke="#2d3142"/>
+        <rect x="80" y="204" width="28" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)"/>
+        <text x="94" y="213" class="svg-tag" fill="#2d3142" text-anchor="middle">ASK</text>
+        <text x="134" y="236" class="svg-title" text-anchor="middle">pi-ask-user</text>
+        <text x="134" y="252" class="svg-sub" text-anchor="middle">external ask bridge</text>
+
+        <rect x="264" y="132" width="160" height="96" rx="6" fill="#f5f5f5"/>
+        <rect x="264" y="132" width="160" height="96" rx="6" fill="#ffffff" stroke="#2d3142"/>
+        <rect x="272" y="140" width="44" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)"/>
+        <text x="294" y="149" class="svg-tag" fill="#2d3142" text-anchor="middle">EXT</text>
+        <text x="344" y="172" class="svg-title" text-anchor="middle">pi-casper client</text>
+        <text x="344" y="188" class="svg-sub" text-anchor="middle">events + Unix socket</text>
+        <text x="344" y="204" class="svg-sub" text-anchor="middle">no Slack API token here</text>
+
+        <rect x="556" y="124" width="116" height="112" rx="6" fill="#f5f5f5"/>
+        <rect x="556" y="124" width="116" height="112" rx="6" fill="rgba(235,108,54,0.08)" stroke="#eb6c36"/>
+        <rect x="564" y="132" width="44" height="12" rx="2" fill="transparent" stroke="rgba(235,108,54,0.40)"/>
+        <text x="586" y="141" class="svg-tag" fill="#eb6c36" text-anchor="middle">BROKER</text>
+        <text x="614" y="168" class="svg-title" text-anchor="middle">Casper</text>
+        <text x="614" y="184" class="svg-title" text-anchor="middle">daemon</text>
+        <text x="614" y="204" class="svg-sub" text-anchor="middle">Socket Mode</text>
+        <text x="614" y="220" class="svg-sub" text-anchor="middle">Block Kit owner</text>
+
+        <rect x="780" y="116" width="108" height="80" rx="6" fill="#f5f5f5"/>
+        <rect x="780" y="116" width="108" height="80" rx="6" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)"/>
+        <rect x="788" y="124" width="44" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.30)"/>
+        <text x="810" y="133" class="svg-tag" fill="#4f5d75" text-anchor="middle">SLACK</text>
+        <text x="834" y="156" class="svg-title" text-anchor="middle">Slack API</text>
+        <text x="834" y="172" class="svg-sub" text-anchor="middle">messages/files/views</text>
+
+        <rect x="780" y="228" width="108" height="68" rx="6" fill="#f5f5f5"/>
+        <rect x="780" y="228" width="108" height="68" rx="6" fill="rgba(79,93,117,0.10)" stroke="#7a8399"/>
+        <rect x="788" y="236" width="36" height="12" rx="2" fill="transparent" stroke="rgba(122,131,153,0.50)"/>
+        <text x="806" y="245" class="svg-tag" fill="#4f5d75" text-anchor="middle">USER</text>
+        <text x="834" y="264" class="svg-title" text-anchor="middle">Milko</text>
+        <text x="834" y="280" class="svg-sub" text-anchor="middle">buttons / modals</text>
+
+        <line x1="36" y1="356" x2="924" y2="356" stroke="rgba(45,49,66,0.12)" stroke-width="0.8"/>
+        <text x="40" y="376" class="svg-tag" fill="#4f5d75">LEGEND</text>
+        <rect x="124" y="364" width="16" height="12" rx="2" fill="rgba(235,108,54,0.08)" stroke="#eb6c36"/>
+        <text x="148" y="376" class="svg-sub">decision owner / focal path</text>
+        <line x1="324" y1="372" x2="372" y2="372" stroke="#2e5aa8" marker-end="url(#arrow-link)"/>
+        <text x="384" y="376" class="svg-sub">Slack Web API or Socket Mode</text>
+        <line x1="568" y1="372" x2="616" y2="372" stroke="#4f5d75" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+        <text x="628" y="376" class="svg-sub">local result / callback</text>
+      </svg>
+    </div>
+
+    <div class="cards">
+      <div class="card">
+        <p class="eyebrow"><span class="dot"></span>Plan mode</p>
+        <h3>Decision owned by <code>pi-plan-mode</code></h3>
+        <ul>
+          <li>Registers a pending plan-review prompt in a global bridge.</li>
+          <li>Emits <code>pi:plan-mode:ready</code> when <code>exit_plan_mode</code> presents the HTML plan.</li>
+          <li>Consumes approve, refine, or exit decisions.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <p class="eyebrow"><span class="dot muted"></span>ask_user</p>
+        <h3>Decision owned by <code>pi-ask-user</code></h3>
+        <ul>
+          <li>Registers a pending question prompt in a global bridge.</li>
+          <li>Validates Slack button/modal answers with the same internal parser.</li>
+          <li>Resolves the local tool call when Slack submits a valid response.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <p class="eyebrow"><span class="dot link"></span>Casper</p>
+        <h3>Transport and Slack ownership</h3>
+        <ul>
+          <li><code>pi-casper</code> forwards structured events over a local socket.</li>
+          <li>The daemon posts Block Kit, opens modals, uploads PDFs, and receives interactions.</li>
+          <li>Slack action results flow back to the local extension that owns the decision.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <p class="eyebrow">Sequence</p>
+    <h2>Plan mode review flow</h2>
+    <p>Plan mode is a review gate around an HTML plan artifact. Slack never edits the plan directly; Slack sends a decision back to the local <code>pi-plan-mode</code> bridge.</p>
+
+    <div class="diagram" aria-label="Plan mode sequence diagram">
+      <svg viewBox="0 0 960 640" role="img">
+        <defs>
+          <marker id="p-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
+          <marker id="p-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#eb6c36"/></marker>
+          <marker id="p-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
+        </defs>
+        <rect width="960" height="640" fill="#f5f5f5"/>
+
+        <!-- Lifelines -->
+        <line x1="112" y1="96" x2="112" y2="552" stroke="rgba(45,49,66,0.20)" stroke-dasharray="3,3"/>
+        <line x1="292" y1="96" x2="292" y2="552" stroke="rgba(45,49,66,0.20)" stroke-dasharray="3,3"/>
+        <line x1="472" y1="96" x2="472" y2="552" stroke="rgba(45,49,66,0.20)" stroke-dasharray="3,3"/>
+        <line x1="652" y1="96" x2="652" y2="552" stroke="rgba(45,49,66,0.20)" stroke-dasharray="3,3"/>
+        <line x1="832" y1="96" x2="832" y2="552" stroke="rgba(45,49,66,0.20)" stroke-dasharray="3,3"/>
+
+        <!-- Actors -->
+        <rect x="52" y="48" width="120" height="48" rx="6" fill="#ffffff" stroke="#2d3142"/>
+        <text x="112" y="72" class="svg-title" text-anchor="middle">Pi agent</text>
+        <text x="112" y="88" class="svg-sub" text-anchor="middle">calls tools</text>
+        <rect x="220" y="48" width="144" height="48" rx="6" fill="rgba(235,108,54,0.08)" stroke="#eb6c36"/>
+        <text x="292" y="72" class="svg-title" text-anchor="middle">pi-plan-mode</text>
+        <text x="292" y="88" class="svg-sub" text-anchor="middle">owns approval</text>
+        <rect x="400" y="48" width="144" height="48" rx="6" fill="#ffffff" stroke="#2d3142"/>
+        <text x="472" y="72" class="svg-title" text-anchor="middle">pi-casper</text>
+        <text x="472" y="88" class="svg-sub" text-anchor="middle">session extension</text>
+        <rect x="580" y="48" width="144" height="48" rx="6" fill="rgba(235,108,54,0.08)" stroke="#eb6c36"/>
+        <text x="652" y="72" class="svg-title" text-anchor="middle">Casper daemon</text>
+        <text x="652" y="88" class="svg-sub" text-anchor="middle">Slack owner</text>
+        <rect x="772" y="48" width="120" height="48" rx="6" fill="rgba(79,93,117,0.10)" stroke="#7a8399"/>
+        <text x="832" y="72" class="svg-title" text-anchor="middle">Slack user</text>
+        <text x="832" y="88" class="svg-sub" text-anchor="middle">buttons/modal</text>
+
+        <!-- Activation bars -->
+        <rect x="288" y="124" width="8" height="344" fill="rgba(45,49,66,0.06)" stroke="#4f5d75" stroke-width="0.8"/>
+        <rect x="468" y="172" width="8" height="232" fill="rgba(45,49,66,0.06)" stroke="#4f5d75" stroke-width="0.8"/>
+        <rect x="648" y="220" width="8" height="224" fill="rgba(45,49,66,0.06)" stroke="#4f5d75" stroke-width="0.8"/>
+
+        <!-- Messages -->
+        <path d="M112 128 H292" stroke="#4f5d75" marker-end="url(#p-arrow)" fill="none"/>
+        <rect x="164" y="116" width="76" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="202" y="125" class="svg-label" text-anchor="middle">EXIT_PLAN</text>
+
+        <path d="M292 164 h60 v24 h-60" stroke="#4f5d75" marker-end="url(#p-arrow)" fill="none"/>
+        <rect x="312" y="152" width="84" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="354" y="161" class="svg-label" text-anchor="middle">REGISTER BRIDGE</text>
+
+        <path d="M292 196 H472" stroke="#eb6c36" stroke-width="1.2" marker-end="url(#p-arrow-accent)" fill="none"/>
+        <rect x="344" y="184" width="76" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="382" y="193" class="svg-label" text-anchor="middle">PLAN_READY</text>
+
+        <path d="M472 228 H652" stroke="#eb6c36" stroke-width="1.2" marker-end="url(#p-arrow-accent)" fill="none"/>
+        <rect x="524" y="216" width="76" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="562" y="225" class="svg-label" text-anchor="middle">PLAN_READY</text>
+
+        <path d="M652 260 H832" stroke="#2e5aa8" marker-end="url(#p-arrow-link)" fill="none"/>
+        <rect x="704" y="248" width="76" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="742" y="257" class="svg-label" text-anchor="middle">POST CARD</text>
+
+        <path d="M652 296 h64 v24 h-64" stroke="#2e5aa8" marker-end="url(#p-arrow-link)" fill="none"/>
+        <rect x="684" y="284" width="80" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="724" y="293" class="svg-label" text-anchor="middle">PDF + LINK</text>
+
+        <path d="M832 348 H652" stroke="#2e5aa8" marker-end="url(#p-arrow-link)" fill="none"/>
+        <rect x="700" y="336" width="84" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="742" y="345" class="svg-label" text-anchor="middle">APPROVE/REFINE</text>
+
+        <path d="M652 380 H472" stroke="#4f5d75" marker-end="url(#p-arrow)" fill="none"/>
+        <rect x="520" y="368" width="84" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="562" y="377" class="svg-label" text-anchor="middle">PLAN_ACTION</text>
+
+        <path d="M472 412 H292" stroke="#4f5d75" marker-end="url(#p-arrow)" fill="none"/>
+        <rect x="328" y="400" width="108" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="382" y="409" class="svg-label" text-anchor="middle">SUBMIT DECISION</text>
+
+        <path d="M292 444 H472" stroke="#4f5d75" stroke-dasharray="5,4" marker-end="url(#p-arrow)" fill="none"/>
+        <rect x="344" y="432" width="76" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="382" y="441" class="svg-label" text-anchor="middle">RESULT</text>
+
+        <path d="M472 476 H652" stroke="#4f5d75" stroke-dasharray="5,4" marker-end="url(#p-arrow)" fill="none"/>
+        <rect x="520" y="464" width="84" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="562" y="473" class="svg-label" text-anchor="middle">ACTION_RESULT</text>
+
+        <path d="M652 508 H832" stroke="#2e5aa8" stroke-dasharray="5,4" marker-end="url(#p-arrow-link)" fill="none"/>
+        <rect x="708" y="496" width="68" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="742" y="505" class="svg-label" text-anchor="middle">UPDATE CARD</text>
+
+        <text x="56" y="584" class="svg-note">Approve starts execution. Refine sends feedback back as a local user message, then the agent revises the same HTML plan and calls exit_plan_mode again.</text>
+      </svg>
+    </div>
+
+    <table class="table">
+      <thead><tr><th>Slack control</th><th>Daemon behavior</th><th>Local outcome</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Approve and execute</strong></td><td>Sends <code>plan_action</code> with <code>action: "approve"</code>.</td><td><code>pi-plan-mode</code> approves the current plan and triggers the execution turn.</td></tr>
+        <tr><td><strong>Request changes</strong></td><td>Opens a Slack modal, extracts text feedback, then sends <code>plan_action</code> with <code>action: "refine"</code>.</td><td><code>pi-plan-mode</code> injects the feedback as a local user message. The agent revises the same plan file and presents it again.</td></tr>
+        <tr><td><strong>Exit plan mode</strong></td><td>Sends <code>plan_action</code> with <code>action: "exit"</code>.</td><td>The local plan review prompt resolves with exit and the Slack card is completed.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <p class="eyebrow">Sequence</p>
+    <h2>ask_user question flow</h2>
+    <p><code>ask_user</code> is a tool prompt, not a plan artifact. The local <code>pi-ask-user</code> extension remains the source of truth: Slack submits a structured response, then <code>pi-ask-user</code> validates it and resolves the waiting tool.</p>
+
+    <div class="diagram" aria-label="ask_user sequence diagram">
+      <svg viewBox="0 0 960 660" role="img">
+        <defs>
+          <marker id="a-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
+          <marker id="a-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#eb6c36"/></marker>
+          <marker id="a-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
+        </defs>
+        <rect width="960" height="660" fill="#f5f5f5"/>
+
+        <!-- Lifelines -->
+        <line x1="112" y1="96" x2="112" y2="568" stroke="rgba(45,49,66,0.20)" stroke-dasharray="3,3"/>
+        <line x1="292" y1="96" x2="292" y2="568" stroke="rgba(45,49,66,0.20)" stroke-dasharray="3,3"/>
+        <line x1="472" y1="96" x2="472" y2="568" stroke="rgba(45,49,66,0.20)" stroke-dasharray="3,3"/>
+        <line x1="652" y1="96" x2="652" y2="568" stroke="rgba(45,49,66,0.20)" stroke-dasharray="3,3"/>
+        <line x1="832" y1="96" x2="832" y2="568" stroke="rgba(45,49,66,0.20)" stroke-dasharray="3,3"/>
+
+        <!-- Actors -->
+        <rect x="52" y="48" width="120" height="48" rx="6" fill="#ffffff" stroke="#2d3142"/>
+        <text x="112" y="72" class="svg-title" text-anchor="middle">Pi agent</text>
+        <text x="112" y="88" class="svg-sub" text-anchor="middle">calls ask_user</text>
+        <rect x="220" y="48" width="144" height="48" rx="6" fill="rgba(235,108,54,0.08)" stroke="#eb6c36"/>
+        <text x="292" y="72" class="svg-title" text-anchor="middle">pi-ask-user</text>
+        <text x="292" y="88" class="svg-sub" text-anchor="middle">owns validation</text>
+        <rect x="400" y="48" width="144" height="48" rx="6" fill="#ffffff" stroke="#2d3142"/>
+        <text x="472" y="72" class="svg-title" text-anchor="middle">pi-casper</text>
+        <text x="472" y="88" class="svg-sub" text-anchor="middle">tool listeners</text>
+        <rect x="580" y="48" width="144" height="48" rx="6" fill="rgba(235,108,54,0.08)" stroke="#eb6c36"/>
+        <text x="652" y="72" class="svg-title" text-anchor="middle">Casper daemon</text>
+        <text x="652" y="88" class="svg-sub" text-anchor="middle">Block Kit state</text>
+        <rect x="772" y="48" width="120" height="48" rx="6" fill="rgba(79,93,117,0.10)" stroke="#7a8399"/>
+        <text x="832" y="72" class="svg-title" text-anchor="middle">Slack user</text>
+        <text x="832" y="88" class="svg-sub" text-anchor="middle">answers</text>
+
+        <!-- Activation bars -->
+        <rect x="288" y="124" width="8" height="364" fill="rgba(45,49,66,0.06)" stroke="#4f5d75" stroke-width="0.8"/>
+        <rect x="468" y="180" width="8" height="292" fill="rgba(45,49,66,0.06)" stroke="#4f5d75" stroke-width="0.8"/>
+        <rect x="648" y="228" width="8" height="264" fill="rgba(45,49,66,0.06)" stroke="#4f5d75" stroke-width="0.8"/>
+
+        <!-- Messages -->
+        <path d="M112 128 H292" stroke="#4f5d75" marker-end="url(#a-arrow)" fill="none"/>
+        <rect x="164" y="116" width="76" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="202" y="125" class="svg-label" text-anchor="middle">ASK_USER</text>
+
+        <path d="M292 164 h68 v24 h-68" stroke="#4f5d75" marker-end="url(#a-arrow)" fill="none"/>
+        <rect x="320" y="152" width="84" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="362" y="161" class="svg-label" text-anchor="middle">REGISTER ASK</text>
+
+        <path d="M292 204 H472" stroke="#4f5d75" marker-end="url(#a-arrow)" fill="none"/>
+        <rect x="340" y="192" width="84" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="382" y="201" class="svg-label" text-anchor="middle">WAIT UPDATE</text>
+
+        <path d="M472 236 h60 v24 h-60" stroke="#4f5d75" marker-end="url(#a-arrow)" fill="none"/>
+        <rect x="496" y="224" width="84" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="538" y="233" class="svg-label" text-anchor="middle">150MS GUARD</text>
+
+        <path d="M472 284 H652" stroke="#eb6c36" stroke-width="1.2" marker-end="url(#a-arrow-accent)" fill="none"/>
+        <rect x="516" y="272" width="92" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="562" y="281" class="svg-label" text-anchor="middle">TOOL_WAITING</text>
+
+        <path d="M652 324 H832" stroke="#2e5aa8" marker-end="url(#a-arrow-link)" fill="none"/>
+        <rect x="704" y="312" width="76" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="742" y="321" class="svg-label" text-anchor="middle">POST PROMPT</text>
+
+        <path d="M832 368 H652" stroke="#2e5aa8" marker-end="url(#a-arrow-link)" fill="none"/>
+        <rect x="700" y="356" width="84" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="742" y="365" class="svg-label" text-anchor="middle">BUTTON/MODAL</text>
+
+        <path d="M652 408 H472" stroke="#4f5d75" marker-end="url(#a-arrow)" fill="none"/>
+        <rect x="512" y="396" width="100" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="562" y="405" class="svg-label" text-anchor="middle">ASK_USER_ACTION</text>
+
+        <path d="M472 448 H292" stroke="#4f5d75" marker-end="url(#a-arrow)" fill="none"/>
+        <rect x="332" y="436" width="100" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="382" y="445" class="svg-label" text-anchor="middle">SUBMIT_RESPONSE</text>
+
+        <path d="M292 488 H472" stroke="#4f5d75" stroke-dasharray="5,4" marker-end="url(#a-arrow)" fill="none"/>
+        <rect x="344" y="476" width="76" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="382" y="485" class="svg-label" text-anchor="middle">VALID/ERROR</text>
+
+        <path d="M472 520 H652" stroke="#4f5d75" stroke-dasharray="5,4" marker-end="url(#a-arrow)" fill="none"/>
+        <rect x="508" y="508" width="108" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="562" y="517" class="svg-label" text-anchor="middle">ACTION_RESULT</text>
+
+        <path d="M652 552 H832" stroke="#2e5aa8" stroke-dasharray="5,4" marker-end="url(#a-arrow-link)" fill="none"/>
+        <rect x="708" y="540" width="68" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="742" y="549" class="svg-label" text-anchor="middle">UPDATE CARD</text>
+
+        <text x="56" y="616" class="svg-note">The local question resolves only after pi-ask-user validates the Slack response. The daemon never invents the answer shape.</text>
+      </svg>
+    </div>
+
+    <table class="table">
+      <thead><tr><th>Question shape</th><th>Slack UI</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td>One question, 1–5 options, no multi/freeform/comment</td><td>Direct Block Kit buttons</td><td>Fast path. Each option button has a unique action ID and a JSON value containing the full prompt ID.</td></tr>
+        <tr><td>Multiple questions, multi-select, freeform text, comments, or larger option sets</td><td>Slack modal</td><td>The modal can collect structured fields that map back to <code>pi-ask-user</code> question objects.</td></tr>
+        <tr><td>Bridge-backed prompt but user types in the channel</td><td>Plain text fallback</td><td><code>pi-casper</code> can route the typed text through <code>submitText()</code> when a pending ask prompt exists.</td></tr>
+        <tr><td>Host/harness-only prompt without bridge metadata</td><td>Fallback notice only</td><td>Casper can display that input is needed, but the local runtime must answer it.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <p class="eyebrow">State and safety</p>
+    <h2>What keeps questions from double-submitting</h2>
+    <p>Both flows use an in-memory pending map on the daemon plus a pending bridge in the local extension. A Slack action is accepted only when the card still matches the active local prompt.</p>
+
+    <div class="cards">
+      <div class="card">
+        <p class="eyebrow"><span class="dot"></span>Prompt identity</p>
+        <h3>Full IDs stay intact</h3>
+        <ul>
+          <li><code>ask_user</code> prompt IDs can contain <code>|</code>, so direct button values are JSON.</li>
+          <li>The daemon stores <code>promptId</code> and a <code>toolCallId → promptId</code> alias.</li>
+          <li>Plan reviews use <code>sessionId:planFilePath</code> as the review ID.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <p class="eyebrow"><span class="dot muted"></span>Race guards</p>
+        <h3>One prompt per tool call</h3>
+        <ul>
+          <li><code>tool_execution_start</code> schedules a delayed ask forward.</li>
+          <li><code>tool_execution_update</code> can also forward.</li>
+          <li><code>forwardedAskUserToolCalls</code> is set before async waits, so only one path posts.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <p class="eyebrow"><span class="dot link"></span>Slack card state</p>
+        <h3>Buttons disappear while submitting</h3>
+        <ul>
+          <li>The daemon marks a card <code>submitting</code> before sending the local action.</li>
+          <li>Submitting and completed cards ignore repeated clicks quietly.</li>
+          <li>Successful results update the card to handled/submitted.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <p class="eyebrow">Mental model</p>
+    <h2>One sentence version</h2>
+    <p><strong>Plan mode asks, “Should this plan execute?”</strong> The pending decision belongs to <code>pi-plan-mode</code>, and Casper makes a Slack review card for it.</p>
+    <p><strong><code>ask_user</code> asks, “What answer should this waiting tool receive?”</strong> The pending decision belongs to <code>pi-ask-user</code>, and Casper makes a Slack button/modal surface for it.</p>
+    <p>In both cases, Slack is only the remote UI. The local extension validates and resolves the decision.</p>
+  </section>
+
+  <footer>
+    Generated for pi-casper implementation context. Key files: packages/pi-casper/index.ts, packages/pi-casper/daemon.mjs, packages/pi-plan-mode/src/index.ts, packages/pi-ask-user/index.ts.
+  </footer>
+</main>
+</body>
+</html>

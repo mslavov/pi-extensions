@@ -106,6 +106,15 @@ export interface BrokerStatus {
 	lastError?: string;
 }
 
+export interface BrokerUploadFileResult {
+	uploaded: true;
+	channelId: string;
+	fileId?: string;
+	fileName: string;
+	title?: string;
+	size: number;
+}
+
 export type CasperForwardedEvent =
 	| { type: "session_started"; timestamp: number }
 	| { type: "agent_started"; timestamp: number }
@@ -136,6 +145,7 @@ export type ClientToBroker =
 	| { v: 1; type: "session_closed"; sessionId: string; reason?: string }
 	| { v: 1; type: "reload_config"; id?: string }
 	| { v: 1; type: "get_status"; id: string }
+	| { v: 1; type: "upload_file"; id: string; sessionId: string; path: string; title?: string; comment?: string }
 	| { v: 1; type: "plan_action_result"; requestId: string; channelId?: string; ok: boolean; message?: string; error?: string }
 	| { v: 1; type: "ask_user_action_result"; requestId: string; channelId?: string; ok: boolean; message?: string; error?: string }
 	| { v: 1; type: "forward_event"; eventId: string; event: CasperForwardedEvent };

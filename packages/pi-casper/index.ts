@@ -1,13 +1,14 @@
 import { spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { createConnection, type Socket } from "node:net";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { basename, dirname, extname } from "node:path";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { basename, dirname, extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { stripFrontmatter, type ExtensionAPI, type ExtensionContext, type SlashCommandInfo } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 
 import {
 	BROKER_SOCKET_PATH,
@@ -20,6 +21,7 @@ import {
 	type BrokerToClient,
 	type BrokerAskUserPrompt,
 	type BrokerAskUserResponse,
+	type BrokerUploadFileResult,
 	type CasperConfig,
 	type CasperForwardedEvent,
 	type ClientToBroker,
@@ -59,6 +61,10 @@ type CompactionReason = "manual" | "threshold" | "overflow";
 interface SlashRouteResult {
 	handled: boolean;
 	text?: string;
+}
+
+interface CasperUploadFileToolResult extends BrokerUploadFileResult {
+	path: string;
 }
 
 interface ExternalAskPrompt {
@@ -112,6 +118,8 @@ const ASK_USER_BRIDGE_SYMBOL = Symbol.for("pi-ask-user:external-bridge:v1");
 const PLAN_MODE_BRIDGE_SYMBOL = Symbol.for("pi-plan-mode:external-bridge:v1");
 const PLAN_READY_EVENT = "pi:plan-mode:ready";
 const PLAN_CLOSED_EVENT = "pi:plan-mode:closed";
+const CASPER_UPLOAD_FILE_TOOL = "casper_upload_file";
+const SLACK_SILENT_TOOLS = new Set([CASPER_UPLOAD_FILE_TOOL]);
 
 const SYSTEM_PROMPT_SUFFIX = `
 
@@ -162,6 +170,13 @@ function guessMediaType(path: string): string | undefined {
 	if (ext === ".webp") return "image/webp";
 	if (ext === ".gif") return "image/gif";
 	return undefined;
+}
+
+function assertSafeUploadPath(path: string): void {
+	const name = basename(path).toLowerCase();
+	if (name === ".env" || name.startsWith(".env.")) throw new Error("Refusing to upload environment files.");
+	if (/\.(pem|key|p12|pfx|crt|cer|der)$/i.test(name)) throw new Error("Refusing to upload credential files.");
+	if (/id_(rsa|dsa|ecdsa|ed25519)$/i.test(name)) throw new Error("Refusing to upload private key files.");
 }
 
 function getTextFromContent(content: unknown): string {
@@ -807,6 +822,33 @@ export default function (pi: ExtensionAPI) {
 		return lines.join("\n");
 	}
 
+	async function uploadFileToSlack(params: { path: string; title?: string; comment?: string }, ctx: ExtensionContext): Promise<CasperUploadFileToolResult> {
+		const filePath = resolve(ctx.cwd, params.path);
+		assertSafeUploadPath(filePath);
+		const stats = await stat(filePath);
+		if (!stats.isFile()) throw new Error(`Not a file: ${filePath}`);
+
+		config = await ensureBrokerSecret(await readConfig());
+		if (!config.botToken || !config.appToken) throw new Error("Casper Slack bridge is not configured.");
+		if (!broker.connected) {
+			await broker.connect(ctx);
+			startSessionUpdates(ctx);
+		}
+		broker.sendSessionUpdate(ctx);
+
+		const result = await broker.request<BrokerUploadFileResult>({
+			v: 1,
+			type: "upload_file",
+			id: randomUUID(),
+			sessionId: ctx.sessionManager.getSessionId(),
+			path: filePath,
+			title: params.title?.trim() || undefined,
+			comment: params.comment?.trim() || undefined,
+		}, 60_000);
+
+		return { ...result, path: filePath };
+	}
+
 	function parseSlashInput(text: string): { command: string; args: string } {
 		const trimmed = text.trim();
 		const spaceIndex = trimmed.search(/\s/);
@@ -1280,6 +1322,30 @@ export default function (pi: ExtensionAPI) {
 		broker.forward({ type: "plan_closed", timestamp: Date.now(), ...parsed });
 	});
 
+	pi.registerTool({
+		name: CASPER_UPLOAD_FILE_TOOL,
+		label: "Casper Upload File",
+		description: "Upload a local file from this pi session to the mapped Slack channel. Use when the user asks to receive a generated artifact, report, screenshot, PDF, archive, or other local file in Slack.",
+		promptSnippet: "Upload a local file to this session's mapped Slack channel.",
+		promptGuidelines: [
+			"When the user asks to receive a generated artifact or local file in Slack, call casper_upload_file with the local path instead of only mentioning the path in text.",
+			"Upload only files that are meant for the user; do not upload secrets, environment files, private keys, token dumps, or unrelated workspace files.",
+			"casper_upload_file always uploads to this pi session's mapped Slack channel; do not ask for or infer a Slack channel ID.",
+		],
+		parameters: Type.Object({
+			path: Type.String({ description: "Local file path to upload to Slack.", minLength: 1 }),
+			title: Type.Optional(Type.String({ description: "Optional Slack file title. Defaults to the file name.", minLength: 1, maxLength: 200 })),
+			comment: Type.Optional(Type.String({ description: "Optional short message to include with the uploaded file.", minLength: 1, maxLength: 1000 })),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const result = await uploadFileToSlack(params, ctx);
+			return {
+				content: [{ type: "text", text: `Uploaded ${result.fileName} to Slack.` }],
+				details: result,
+			};
+		},
+	});
+
 	pi.registerCommand("casper-setup", {
 		description: "Configure Slack Socket Mode bridge",
 		handler: async (_args, ctx) => {
@@ -1444,6 +1510,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("tool_execution_start", async (event, ctx) => {
 		setCurrentCtx(ctx);
+		if (SLACK_SILENT_TOOLS.has(event.toolName)) return;
 		if (event.toolName === "ask_user") {
 			waitingAskUserToolCalls.set(event.toolCallId, event.args);
 			scheduleAskUserForward(event.toolCallId, event.args, ctx);
@@ -1463,6 +1530,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("tool_execution_end", async (event, ctx) => {
 		setCurrentCtx(ctx);
+		if (SLACK_SILENT_TOOLS.has(event.toolName)) return;
 		if (event.toolName === "ask_user") {
 			waitingAskUserToolCalls.delete(event.toolCallId);
 			forwardedAskUserToolCalls.delete(event.toolCallId);

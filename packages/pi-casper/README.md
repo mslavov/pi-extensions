@@ -117,7 +117,21 @@ Bridge-backed `pi-ask-user` prompts render as Slack controls when possible:
 - typed Slack replies remain available for every prompt;
 - prompts controlled by the local Pi runtime instead of `pi-ask-user` still show a local-answer notice.
 
-Slack interactions are delivered over Socket Mode. Stale or duplicate button clicks produce ephemeral Slack feedback, and answered prompts update their Slack card to a completed state.
+Slack interactions are delivered over Socket Mode. Answered prompts update their Slack card to a completed state; repeated clicks on completed or submitting prompt cards are ignored.
+
+## Uploading local files to Slack
+
+Casper registers `casper_upload_file` for local session agents. Use it when the user asks to receive a generated artifact or local file in Slack:
+
+```text
+casper_upload_file({ path: "./report.pdf", title: "Report" })
+```
+
+The tool validates the local file path, sends an authenticated request to the Casper broker, and the broker uploads the file to the session's mapped Slack channel using Slack's external file upload API. The local session never receives the Slack bot token and cannot choose an arbitrary Slack channel.
+
+Casper suppresses `casper_upload_file` from Slack tool-summary mirroring. The uploaded Slack file is the visible artifact; the transcript does not get an extra "working on upload" tool message for that tool.
+
+The upload path rejects obvious secret files such as `.env` files, private keys, and certificate/key containers.
 
 ## Files
 
