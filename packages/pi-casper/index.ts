@@ -620,6 +620,11 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	function sendNextQueuedSlackTurnIfReady(ctx: ExtensionContext): void {
+		if (compactionInProgress || activeSlackTurn || queuedSlackTurns.length === 0 || !ctx.isIdle()) return;
+		sendUserMessageSafely(queuedSlackTurns[0].content);
+	}
+
 	function buildRecentSessionMessages(ctx: ExtensionContext): SessionSnippet[] {
 		const snippets: SessionSnippet[] = [];
 		const entries = ctx.sessionManager.getEntries();
@@ -742,13 +747,15 @@ export default function (pi: ExtensionAPI) {
 			}
 			forwardCompactionStart("manual");
 			ctx.compact({
-				onError: (error) =>
+				onError: (error) => {
 					forwardCompactionEnd({
 						reason: "manual",
 						aborted: error.name === "AbortError" || error.message === "Compaction cancelled",
 						errorMessage: error.name === "AbortError" || error.message === "Compaction cancelled" ? undefined : error.message,
 						attention: true,
-					}),
+					});
+					sendNextQueuedSlackTurnIfReady(ctx);
+				},
 			});
 			return { handled: true };
 		}
@@ -1018,6 +1025,12 @@ export default function (pi: ExtensionAPI) {
 		const turn = await createSlackTurn(routedDelivery, historyTurns);
 		slackPromptTexts.add(normalizePromptText(turn.promptText));
 		const idle = ctx.isIdle();
+		if (compactionInProgress) {
+			queuedSlackTurns.push(turn);
+			broker.forward({ type: "message_end", timestamp: Date.now(), message: { role: "custom", customType: "pi-casper", content: "Queued your Slack message until context compaction finishes.", display: true }, attention: true });
+			broker.sendSessionUpdate(ctx);
+			return;
+		}
 		if (idle) queuedSlackTurns.push(turn);
 		broker.sendSessionUpdate(ctx);
 		sendUserMessageSafely(turn.content, idle ? undefined : "steer");
@@ -1475,7 +1488,10 @@ export default function (pi: ExtensionAPI) {
 		forwardCompactionStart();
 		event.signal.addEventListener(
 			"abort",
-			() => forwardCompactionEnd({ aborted: true, attention: true }),
+			() => {
+				forwardCompactionEnd({ aborted: true, attention: true });
+				sendNextQueuedSlackTurnIfReady(ctx);
+			},
 			{ once: true },
 		);
 		broker.sendSessionUpdate(ctx);
@@ -1494,6 +1510,7 @@ export default function (pi: ExtensionAPI) {
 		});
 		broker.sendSessionUpdate(ctx);
 		updateStatus(ctx);
+		sendNextQueuedSlackTurnIfReady(ctx);
 	});
 
 	pi.on("message_end", async (event, _ctx) => {

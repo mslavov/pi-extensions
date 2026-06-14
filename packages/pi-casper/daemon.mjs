@@ -1088,12 +1088,17 @@ async function postForwardedEvent(client, forwarded) {
 			}
 			return;
 		}
-		if (isUserMessagePayload(forwarded.message)) {
-			await postSlackUserMessage(channel, userMessageBlocks(forwarded.message), fallbackTextForUserMessage(forwarded.message));
+			if (isUserMessagePayload(forwarded.message)) {
+				await postSlackUserMessage(channel, userMessageBlocks(forwarded.message), fallbackTextForUserMessage(forwarded.message));
+				return;
+			}
+			if (isCasperNoticePayload(forwarded.message)) {
+				const text = fallbackTextForCasperNotice(forwarded.message);
+				await postSlackMessage(channel, textSectionBlocks(text), mentionForAttention(text, Boolean(forwarded.attention)));
+				return;
+			}
 			return;
 		}
-		return;
-	}
 	if (forwarded.type === "compaction_start") {
 		await updateCompactionMessage(client.sessionId, channel, forwarded);
 		return;
@@ -1129,6 +1134,10 @@ async function postForwardedEvent(client, forwarded) {
 		clearCompactionMessage(client.sessionId);
 		return;
 	}
+	if (forwarded.type === "agent_finished") {
+		await postAgentFinished(channel, forwarded);
+		return;
+	}
 }
 
 async function updateAssistantTurnMessage(client, channel, forwarded, final) {
@@ -1161,10 +1170,28 @@ function assistantMessageKey(sessionId, streamId) {
 	return `${sessionId}:${streamId}`;
 }
 
+function mentionForAttention(text, attention = true) {
+	if (!attention || !config.userId) return text;
+	const mention = `<@${config.userId}>`;
+	return String(text || "").includes(mention) ? text : `${mention} ${text || "Response ready"}`;
+}
+
 function clearAssistantTurnMessage(sessionId) {
 	for (const key of assistantTurnMessages.keys()) {
 		if (key.startsWith(`${sessionId}:`)) assistantTurnMessages.delete(key);
 	}
+}
+
+async function postAgentFinished(channel, forwarded) {
+	const text = mentionForAttention(agentFinishedText(forwarded), Boolean(forwarded.attention));
+	await postSlackMessage(channel, [contextBlock(text)], text);
+}
+
+function agentFinishedText(forwarded) {
+	if (forwarded.stopReason === "aborted") return ":black_circle: Agent turn stopped.";
+	if (forwarded.errorMessage) return `:warning: Agent turn ended with an error: ${escapeMrkdwn(clip(forwarded.errorMessage, 300))}`;
+	if (forwarded.stopReason === "error") return ":warning: Agent turn ended with an error.";
+	return ":white_check_mark: Agent turn finished.";
 }
 
 async function postPlanReview(client, channel, forwarded) {
@@ -1273,7 +1300,8 @@ function planReviewBlocks(review) {
 }
 
 function planReviewFallbackText(review) {
-	return `${review.title || "Plan ready"}: ${review.planFilePath}${review.status ? ` · ${review.status}` : ""}`;
+	const text = `${review.title || "Plan ready"}: ${review.planFilePath}${review.status ? ` · ${review.status}` : ""}`;
+	return mentionForAttention(text, !review.completed);
 }
 
 function shortPlanId(planId) {
@@ -1745,7 +1773,11 @@ function toolResultText(result) {
 
 async function updateAskUserPromptMessage(prompt) {
 	if (!prompt.messageTs) return;
-	await updateSlackMessage(prompt.channel, prompt.messageTs, askUserPromptStateBlocks(prompt), prompt.status || "ask_user prompt");
+	await updateSlackMessage(prompt.channel, prompt.messageTs, askUserPromptStateBlocks(prompt), askUserPromptFallbackText(prompt));
+}
+
+function askUserPromptFallbackText(prompt) {
+	return mentionForAttention(prompt.status || "ask_user prompt", !prompt.completed);
 }
 
 function askUserPromptStateBlocks(prompt) {
@@ -1917,6 +1949,10 @@ function isUserMessagePayload(message) {
 	return Boolean(message && typeof message === "object" && message.role === "user");
 }
 
+function isCasperNoticePayload(message) {
+	return Boolean(message && typeof message === "object" && message.role === "custom" && message.customType === "pi-casper");
+}
+
 function shouldPostMessage(message) {
 	const value = message && typeof message === "object" ? message : {};
 	if (value.role !== "assistant") return true;
@@ -2029,6 +2065,10 @@ function fallbackTextForMessage(message) {
 		if (text) return text;
 	}
 	return "";
+}
+
+function fallbackTextForCasperNotice(message) {
+	return fallbackTextForMessage(message).trim() || "Casper notice";
 }
 
 function extractAssistantText(messages) {

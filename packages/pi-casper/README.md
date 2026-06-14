@@ -150,7 +150,7 @@ The upload path rejects obvious secret files such as `.env` files, private keys,
 
 - Casper uses Socket Mode, so it does not need a public webhook URL.
 - Session channels are public by default.
-- The configured Slack user is mentioned on errors and input-needed events.
+- The configured Slack user is mentioned on key notification events, including plan reviews, `ask_user` prompts, and agent turn completion.
 - Slack file attachments are downloaded locally and passed to pi as file paths; images are also forwarded as image inputs when possible.
 - Slack event delivery for unmapped channels depends on the app's Socket Mode subscriptions, channel membership, and workspace permissions.
 
