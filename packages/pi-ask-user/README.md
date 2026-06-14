@@ -118,6 +118,25 @@ Multi-question wizard for batching related clarifications:
 
 `displayMode: "inline"` uses the same interaction logic but skips overlay mode when calling `ctx.ui.custom(...)`. RPC/headless fallback behavior is unchanged.
 
+## External bridge
+
+While an `ask_user` tool call is waiting, the extension exposes the active prompt through:
+
+```ts
+globalThis[Symbol.for("pi-ask-user:external-bridge:v1")]
+```
+
+The bridge is intended for companion extensions such as Slack bridges. Pending prompts are keyed by Pi session ID and include `promptId`, `createdAt`, normalized `questions`, `submitText(text)`, and `submitResponse(response)`. `submitText` preserves the typed-reply parser. `submitResponse` accepts the same structured result shapes used internally by the UI:
+
+```ts
+{ kind: "selection", selections: ["Option"], comment?: "optional note" }
+{ kind: "freeform", text: "custom answer" }
+{ kind: "questions", responses: { "Question text": responseOrNull } }
+null // cancel
+```
+
+Structured submissions are validated against the active prompt before completing the tool call.
+
 ## Personal preferences via environment variables
 
 Configure your defaults globally by setting these in your shell profile (`~/.zshrc`, `~/.bash_profile`, etc.):

@@ -39,7 +39,7 @@ describe("plan review feedback formatting", () => {
     });
 
     try {
-      const response = await fetch(new URL("/decision", server.url), {
+      const response = await fetch(new URL("decision", server.url), {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({

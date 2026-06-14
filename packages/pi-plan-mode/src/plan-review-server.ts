@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { randomBytes } from "node:crypto";
 import type { AddressInfo } from "node:net";
 
 export type PlanReviewAction = "approve" | "refine" | "exit";
@@ -74,6 +75,7 @@ export function formatPlanReviewFeedback(options: {
 }
 
 export async function startPlanReviewServer(options: StartPlanReviewServerOptions): Promise<PlanReviewServer> {
+	const basePath = `/review/${randomBytes(18).toString("hex")}`;
 	let resolveDecision!: (decision: PlanReviewDecision) => void;
 	const decisionPromise = new Promise<PlanReviewDecision>((resolve) => {
 		resolveDecision = resolve;
@@ -92,11 +94,17 @@ export async function startPlanReviewServer(options: StartPlanReviewServerOption
 
 		try {
 			if (req.method === "GET" && url.pathname === "/") {
-				sendHtml(res, buildReviewHtml(options.planFilePath));
+				res.writeHead(302, { location: `${basePath}/` });
+				res.end();
 				return;
 			}
 
-			if (req.method === "GET" && url.pathname === "/plan") {
+			if (req.method === "GET" && (url.pathname === basePath || url.pathname === `${basePath}/`)) {
+				sendHtml(res, buildReviewHtml(options.planFilePath, basePath));
+				return;
+			}
+
+			if (req.method === "GET" && url.pathname === `${basePath}/plan`) {
 				res.writeHead(200, {
 					"content-type": "text/html; charset=utf-8",
 					"cache-control": "no-store",
@@ -107,7 +115,7 @@ export async function startPlanReviewServer(options: StartPlanReviewServerOption
 				return;
 			}
 
-			if (req.method === "POST" && url.pathname === "/decision") {
+			if (req.method === "POST" && url.pathname === `${basePath}/decision`) {
 				const body = await parseJsonBody(req);
 				const decision = parseDecisionBody(body, options.planFilePath);
 				const accepted = publishDecision(decision);
@@ -146,7 +154,7 @@ export async function startPlanReviewServer(options: StartPlanReviewServerOption
 	const port = (address as AddressInfo).port;
 
 	return {
-		url: `http://127.0.0.1:${port}/`,
+		url: `http://127.0.0.1:${port}${basePath}/`,
 		waitForDecision: () => decisionPromise,
 		stop: () => server.close(),
 	};
@@ -246,8 +254,9 @@ function blockquote(value: string): string {
 	return value.split("\n").map((line) => `> ${line}`).join("\n");
 }
 
-function buildReviewHtml(planFilePath: string): string {
+function buildReviewHtml(planFilePath: string, basePath: string): string {
 	const title = escapeHtml(planFilePath);
+	const escapedBasePath = escapeHtml(basePath);
 	return `<!doctype html>
 <html lang="en">
 <head>
@@ -295,7 +304,7 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 <div class="app">
   <section class="plan-wrap">
     <header><strong>Plan review</strong><code>${title}</code></header>
-    <iframe id="plan" sandbox="allow-same-origin" src="/plan"></iframe>
+    <iframe id="plan" sandbox="allow-same-origin" src="${escapedBasePath}/plan"></iframe>
   </section>
   <aside>
     <div class="side-head">
@@ -473,7 +482,7 @@ function escapeText(value) {
 async function submit(action) {
   document.querySelectorAll('.actions button').forEach((button) => button.disabled = true);
   try {
-    const response = await fetch('/decision', {
+    const response = await fetch('${escapedBasePath}/decision', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ action, annotations, note: note.value }),

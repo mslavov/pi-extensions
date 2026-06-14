@@ -5,7 +5,7 @@
  * and a custom box border instead of manual ANSI box drawing.
  */
 
-import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { Type, type TUnsafe } from "@sinclair/typebox";
 import {
@@ -31,6 +31,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { renderSingleSelectRows } from "./single-select-layout";
 
+import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 const _require = createRequire(import.meta.url);
 const ASK_USER_VERSION: string = (_require("./package.json") as { version: string }).version;
@@ -163,7 +164,28 @@ type AskToolDetails = AskSingleToolDetails | AskWizardToolDetails;
 
 type AskUIResult = AskResponse | AskWizardResponse;
 
+type ExternalAskSubmission = AskUIResult | null;
+
+interface ExternalAskResult {
+   ok: boolean;
+   error?: string;
+}
+
+interface ExternalAskPrompt {
+   promptId: string;
+   sessionId: string;
+   createdAt: number;
+   questions: AskQuestionDetails[];
+   submitText(text: string): ExternalAskResult;
+   submitResponse(response: ExternalAskSubmission): ExternalAskResult;
+}
+
+interface ExternalAskBridge {
+   pending: Map<string, ExternalAskPrompt>;
+}
+
 const MAX_WIZARD_QUESTIONS = 4;
+const ASK_USER_BRIDGE_SYMBOL = Symbol.for("pi-ask-user:external-bridge:v1");
 
 function normalizeOptions(options: AskOptionInput[]): QuestionOption[] {
    return options
@@ -301,6 +323,169 @@ function createSelectionResponse(selections: string[], comment?: string | null):
    return normalizedComment
       ? { kind: "selection", selections: normalizedSelections, comment: normalizedComment }
       : { kind: "selection", selections: normalizedSelections };
+}
+
+function getExternalAskBridge(): ExternalAskBridge {
+   const globalRecord = globalThis as Record<PropertyKey, unknown>;
+   const existing = globalRecord[ASK_USER_BRIDGE_SYMBOL] as ExternalAskBridge | undefined;
+   if (existing) return existing;
+   const bridge: ExternalAskBridge = { pending: new Map() };
+   globalRecord[ASK_USER_BRIDGE_SYMBOL] = bridge;
+   return bridge;
+}
+
+function parseExternalQuestionResponse(text: string, question: NormalizedAskQuestion): AskResponse | string | null {
+   const trimmed = text.trim();
+   if (!trimmed) return "Answer cannot be empty.";
+   if (/^(cancel|skip)$/i.test(trimmed)) return null;
+
+   if (question.options.length === 0) return createFreeformResponse(trimmed) ?? "Answer cannot be empty.";
+
+   const tokens = trimmed
+      .split(/[,\n]/)
+      .map((token) => token.trim())
+      .filter(Boolean);
+   const selections: string[] = [];
+   for (const token of tokens) {
+      const numeric = token.match(/^#?(\d+)$/);
+      if (numeric) {
+         const option = question.options[Number.parseInt(numeric[1], 10) - 1];
+         if (option) selections.push(option.title);
+         continue;
+      }
+      const option = question.options.find((candidate) => candidate.title.toLowerCase() === token.toLowerCase());
+      if (option) selections.push(option.title);
+   }
+
+   if (selections.length > 0) {
+      const limited = question.allowMultiple ? selections : selections.slice(0, 1);
+      return createSelectionResponse(limited) ?? "Answer cannot be empty.";
+   }
+
+   if (question.allowFreeform) return createFreeformResponse(trimmed) ?? "Answer cannot be empty.";
+   return `Reply with an option number or title: ${question.options.map((option, index) => `${index + 1}. ${option.title}`).join(", ")}`;
+}
+
+function parseExternalAskResponse(text: string, questions: NormalizedAskQuestion[]): AskUIResult | string | null {
+   const trimmed = text.trim();
+   if (/^cancel$/i.test(trimmed)) return null;
+   if (/^skip$/i.test(trimmed) && questions.length > 1) return createWizardResponse(questions, {});
+   if (questions.length === 1) return parseExternalQuestionResponse(text, questions[0]);
+
+   const responses: Record<string, AskResponse | null> = {};
+   const byHeader = new Map<string, NormalizedAskQuestion>();
+   questions.forEach((question, index) => {
+      byHeader.set(String(index + 1).toLowerCase(), question);
+      byHeader.set(question.header.toLowerCase(), question);
+      byHeader.set(question.question.toLowerCase(), question);
+   });
+
+   for (const line of text.split("\n")) {
+      const match = line.match(/^\s*([^:.)-]+)\s*[:.)-]\s*(.+)$/);
+      if (!match) continue;
+      const question = byHeader.get(match[1].trim().toLowerCase());
+      if (!question) continue;
+      const parsed = parseExternalQuestionResponse(match[2], question);
+      if (typeof parsed === "string") return `${question.header}: ${parsed}`;
+      responses[question.question] = parsed;
+   }
+
+   if (Object.keys(responses).length === 0) {
+      return `Reply with one line per question, for example:\n${questions.map((question, index) => `${index + 1}: your answer`).join("\n")}`;
+   }
+
+   return createWizardResponse(questions, responses);
+}
+
+function validateExternalQuestionResponse(response: unknown, question: NormalizedAskQuestion): AskResponse | string | null {
+   if (response === null) return null;
+   if (!response || typeof response !== "object") return "Answer is invalid.";
+
+   const value = response as Partial<AskResponse>;
+   if (value.kind === "freeform") {
+      if (!question.allowFreeform) return "Freeform answers are not allowed for this question.";
+      return createFreeformResponse(value.text) ?? "Answer cannot be empty.";
+   }
+
+   if (value.kind !== "selection") return "Answer kind is invalid.";
+   if (question.options.length === 0) return "This question expects a freeform answer.";
+   if (!Array.isArray(value.selections)) return "Selection answer is invalid.";
+
+   const validSelections: string[] = [];
+   for (const rawSelection of value.selections) {
+      const selection = typeof rawSelection === "string" ? rawSelection.trim() : "";
+      const option = question.options.find((candidate) => candidate.title.toLowerCase() === selection.toLowerCase());
+      if (!option) return `Unknown option: ${selection || "(empty)"}`;
+      validSelections.push(option.title);
+   }
+
+   if (validSelections.length === 0) return "Select at least one option.";
+   if (!question.allowMultiple && validSelections.length > 1) return "Select only one option.";
+   if (value.comment && !question.allowComment) return "Comments are not enabled for this question.";
+   return createSelectionResponse(validSelections, value.comment) ?? "Answer cannot be empty.";
+}
+
+function validateExternalAskSubmission(response: ExternalAskSubmission, questions: NormalizedAskQuestion[]): AskUIResult | string | null {
+   if (response === null) return null;
+   if (!response || typeof response !== "object") return "Answer is invalid.";
+   if (questions.length === 1) return validateExternalQuestionResponse(response, questions[0]);
+
+   if ((response as Partial<AskWizardResponse>).kind !== "questions") {
+      return `Answer ${questions.length} questions using the wizard response shape.`;
+   }
+
+   const rawResponses = (response as Partial<AskWizardResponse>).responses;
+   if (!rawResponses || typeof rawResponses !== "object" || Array.isArray(rawResponses)) {
+      return "Question responses are invalid.";
+   }
+
+   const byQuestion = new Map(questions.map((question) => [question.question, question]));
+   for (const key of Object.keys(rawResponses)) {
+      if (!byQuestion.has(key)) return `Unknown question: ${key}`;
+   }
+
+   const responses: Record<string, AskResponse | null> = {};
+   for (const question of questions) {
+      const rawResponse = (rawResponses as Record<string, unknown>)[question.question] ?? null;
+      const parsed = validateExternalQuestionResponse(rawResponse, question);
+      if (typeof parsed === "string") return `${question.header}: ${parsed}`;
+      responses[question.question] = parsed;
+   }
+
+   return createWizardResponse(questions, responses);
+}
+
+function registerExternalAsk(
+   ctx: ExtensionContext,
+   promptId: string,
+   questions: NormalizedAskQuestion[],
+   complete: (result: AskUIResult | null) => void,
+): () => void {
+   const sessionId = ctx.sessionManager?.getSessionId?.();
+   if (!sessionId) return () => undefined;
+   const bridge = getExternalAskBridge();
+   const prompt: ExternalAskPrompt = {
+      promptId,
+      sessionId,
+      createdAt: Date.now(),
+      questions: questions.map(questionToDetails),
+      submitText(text) {
+         const parsed = parseExternalAskResponse(text, questions);
+         if (typeof parsed === "string") return { ok: false, error: parsed };
+         complete(parsed);
+         return { ok: true };
+      },
+      submitResponse(response) {
+         const parsed = validateExternalAskSubmission(response, questions);
+         if (typeof parsed === "string") return { ok: false, error: parsed };
+         complete(parsed);
+         return { ok: true };
+      },
+   };
+   bridge.pending.set(sessionId, prompt);
+   return () => {
+      if (bridge.pending.get(sessionId) === prompt) bridge.pending.delete(sessionId);
+   };
 }
 
 function formatResponseSummary(response: AskResponse): string {
@@ -2078,24 +2263,16 @@ export default function(pi: ExtensionAPI) {
             };
          }
 
-         if (!isWizard && options.length === 0) {
-            const prompt = normalizedContext ? `${question}\n\nContext:\n${normalizedContext}` : question;
-            const answer = await ctx.ui.input(prompt, "Type your answer...", timeout ? { timeout } : undefined);
-            const response = createFreeformResponse(answer);
-
-            if (!response) {
-               return {
-                  content: [{ type: "text", text: "User cancelled the question" }],
-                  details: { question, context: normalizedContext, options, response: null, cancelled: true } as AskToolDetails,
-               };
-            }
-
-            pi.events.emit("ask:answered", { question, context: normalizedContext, response });
-            return {
-               content: [{ type: "text", text: `User answered: ${formatResponseSummary(response)}` }],
-               details: { question, context: normalizedContext, options, response, cancelled: false } as AskToolDetails,
-            };
-         }
+         let result: AskUIResult | null;
+         let overlayHandle: OverlayHandle | undefined;
+         let removeOverlayInputListener: (() => void) | undefined;
+         let externalDone: ((result: AskUIResult | null) => void) | undefined;
+         let pendingExternalResult: { result: AskUIResult | null } | undefined;
+         const promptId = String(_toolCallId || randomUUID());
+         const unregisterExternalAsk = registerExternalAsk(ctx, promptId, questions, (result) => {
+            if (externalDone) externalDone(result);
+            else pendingExternalResult = { result };
+         });
 
          onUpdate?.({
             content: [{ type: "text", text: "Waiting for user input..." }],
@@ -2108,12 +2285,16 @@ export default function(pi: ExtensionAPI) {
                : { question, context: normalizedContext, options, response: null, cancelled: false },
          });
 
-         let result: AskUIResult | null;
-         let overlayHandle: OverlayHandle | undefined;
-         let removeOverlayInputListener: (() => void) | undefined;
          let hasAnnouncedHide = false;
          try {
             const customFactory = (tui: TUI, theme: Theme, keybindings: KeybindingsManager, done: (result: AskUIResult | null) => void) => {
+               externalDone = done;
+               if (pendingExternalResult) {
+                  const externalResult = pendingExternalResult.result;
+                  pendingExternalResult = undefined;
+                  queueMicrotask(() => done(externalResult));
+               }
+
                if (signal) {
                   const onAbort = () => done(null);
                   signal.addEventListener("abort", onAbort, { once: true });
@@ -2197,6 +2378,8 @@ export default function(pi: ExtensionAPI) {
                details: { error: message },
             };
          } finally {
+            unregisterExternalAsk();
+            externalDone = undefined;
             removeOverlayInputListener?.();
          }
 

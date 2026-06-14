@@ -168,6 +168,7 @@ afterEach(() => {
    for (const cleanup of cleanupCallbacks.splice(0).reverse()) {
       cleanup();
    }
+   delete (globalThis as any)[Symbol.for("pi-ask-user:external-bridge:v1")];
 });
 
 type RegisteredTool = {
@@ -218,10 +219,93 @@ function createTheme() {
    };
 }
 
+async function answerViaExternalBridge(params: any, submit: (prompt: any) => void) {
+   const tool = await setupTool();
+   return tool.execute(
+      "tool-call-id",
+      params,
+      undefined,
+      undefined,
+      {
+         hasUI: true,
+         sessionManager: { getSessionId: () => "session-1" },
+         ui: {
+            custom: async (factory: any) => new Promise((resolve) => {
+               try {
+                  factory({}, createTheme(), createKeybindings(), resolve);
+               } catch {
+                  // The bridge is registered before UI construction. These tests
+                  // exercise external submission without needing a full TUI mock.
+               }
+               const bridge = (globalThis as any)[Symbol.for("pi-ask-user:external-bridge:v1")];
+               const prompt = bridge.pending.get("session-1");
+               submit(prompt);
+            }),
+         },
+      },
+   );
+}
+
 describe("ask_user", () => {
    test("registers with executionMode 'sequential' so the agent loop awaits the user's answer before other tool calls run", async () => {
       const tool = await setupTool();
       expect((tool as any).executionMode).toBe("sequential");
+   });
+
+   test("external bridge accepts structured single-selection responses", async () => {
+      let promptSnapshot: any;
+      const result = await answerViaExternalBridge(
+         { question: "Choose", options: ["Alpha", "Beta"], allowFreeform: false },
+         (prompt) => {
+            promptSnapshot = { promptId: prompt.promptId, createdAt: prompt.createdAt, questions: prompt.questions };
+            const submitted = prompt.submitResponse({ kind: "selection", selections: ["beta"] });
+            expect(submitted.ok).toBe(true);
+         },
+      );
+
+      expect(promptSnapshot.promptId).toBe("tool-call-id");
+      expect(typeof promptSnapshot.createdAt).toBe("number");
+      expect(promptSnapshot.questions).toHaveLength(1);
+      expect(result.details.response).toEqual({ kind: "selection", selections: ["Beta"] });
+      expect(result.content[0].text).toContain("User answered: Beta");
+   });
+
+   test("external bridge rejects invalid structured selections", async () => {
+      const result = await answerViaExternalBridge(
+         { question: "Choose", options: ["Alpha"], allowFreeform: false },
+         (prompt) => {
+            const submitted = prompt.submitResponse({ kind: "selection", selections: ["Gamma"] });
+            expect(submitted).toEqual({ ok: false, error: "Unknown option: Gamma" });
+            prompt.submitResponse(null);
+         },
+      );
+
+      expect(result.details.cancelled).toBe(true);
+   });
+
+   test("external bridge accepts structured wizard responses with comments and freeform answers", async () => {
+      const result = await answerViaExternalBridge(
+         {
+            questions: [
+               { question: "Pick stack", header: "Stack", options: ["React", "Vue"], allowComment: true, allowFreeform: false },
+               { question: "Notes", header: "Notes", allowFreeform: true },
+            ],
+         },
+         (prompt) => {
+            const submitted = prompt.submitResponse({
+               kind: "questions",
+               responses: {
+                  "Pick stack": { kind: "selection", selections: ["React"], comment: "Fits current code" },
+                  Notes: { kind: "freeform", text: "Keep it simple" },
+               },
+            });
+            expect(submitted.ok).toBe(true);
+         },
+      );
+
+      expect(result.details.responses["Pick stack"]).toEqual({ kind: "selection", selections: ["React"], comment: "Fits current code" });
+      expect(result.details.responses.Notes).toEqual({ kind: "freeform", text: "Keep it simple" });
+      expect(result.content[0].text).toContain("User answered questions");
    });
 
    test("uses overlay mode by default", async () => {

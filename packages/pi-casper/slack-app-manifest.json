@@ -7,7 +7,16 @@
 		"bot_user": {
 			"display_name": "Casper",
 			"always_online": false
-		}
+		},
+		"slash_commands": [
+			{
+				"command": "/casper",
+				"url": "https://example.com/slack/message_action",
+				"description": "Control Casper and route commands to pi sessions.",
+				"usage_hint": "status | casper-status | compact | stop | reload | skill:name instructions",
+				"should_escape": false
+			}
+		]
 	},
 	"oauth_config": {
 		"scopes": {
@@ -18,8 +27,13 @@
 				"channels:manage",
 				"channels:read",
 				"channels:write.invites",
+				"commands",
 				"chat:write",
-				"files:read"
+				"chat:write.customize",
+				"chat:write.public",
+				"files:read",
+				"files:write",
+				"users:read"
 			]
 		},
 		"pkce_enabled": false
@@ -30,6 +44,9 @@
 				"app_mention",
 				"message.channels"
 			]
+		},
+		"interactivity": {
+			"is_enabled": true
 		},
 		"org_deploy_enabled": false,
 		"socket_mode_enabled": true,

@@ -28,13 +28,30 @@ import { pathToFileURL } from "node:url";
 import { getMarkdownTheme, type ExtensionAPI, type ExtensionContext, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { Key, Markdown, Text } from "@earendil-works/pi-tui";
-import { startPlanReviewServer, type PlanReviewDecision } from "./plan-review-server.js";
+import { formatPlanReviewFeedback, startPlanReviewServer, type PlanReviewDecision } from "./plan-review-server.js";
 
 const AGENT_TOOL = "Agent";
 const EXPLORE_AGENT = "Explore";
 const PLAN_AGENT = "Plan";
 const PLAN_WRITER_AGENT = "PlanWriter";
 const PI_NOTIFY_EVENT = "pi:notify";
+const PLAN_READY_EVENT = "pi:plan-mode:ready";
+const PLAN_CLOSED_EVENT = "pi:plan-mode:closed";
+const PLAN_MODE_BRIDGE_SYMBOL = Symbol.for("pi-plan-mode:external-bridge:v1");
+
+type ExternalPlanReviewAction = "approve" | "refine" | "exit";
+
+type ExternalPlanReviewPrompt = {
+	sessionId: string;
+	planFilePath: string;
+	reviewUrl?: string;
+	createdAt: number;
+	submitDecision(action: ExternalPlanReviewAction, feedback?: string): { ok: boolean; error?: string };
+};
+
+type ExternalPlanModeBridge = {
+	pending: Map<string, ExternalPlanReviewPrompt>;
+};
 
 export default function planModeExtension(pi: ExtensionAPI): void {
 	let planModeEnabled = false;
@@ -241,6 +258,93 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		return new Promise((resolve) => setTimeout(resolve, ms));
 	}
 
+	function getExternalPlanModeBridge(): ExternalPlanModeBridge {
+		const global = globalThis as Record<PropertyKey, unknown>;
+		const existing = global[PLAN_MODE_BRIDGE_SYMBOL] as ExternalPlanModeBridge | undefined;
+		if (existing) return existing;
+		const bridge = { pending: new Map<string, ExternalPlanReviewPrompt>() };
+		global[PLAN_MODE_BRIDGE_SYMBOL] = bridge;
+		return bridge;
+	}
+
+	function planReadyMessage(reviewUrl?: string): string {
+		return reviewUrl ? `HTML plan ready: ${planFilePath} (${reviewUrl})` : `HTML plan ready: ${planFilePath}`;
+	}
+
+	function emitPlanReady(ctx: ExtensionContext, reviewUrl?: string): void {
+		const sessionId = ctx.sessionManager.getSessionId();
+		const event = {
+			v: 1,
+			source: "pi-plan-mode",
+			kind: "ready",
+			level: "info",
+			title: "Plan ready",
+			message: planReadyMessage(reviewUrl),
+			sessionId,
+			planFilePath,
+			reviewUrl,
+			dedupeKey: `plan-ready:${sessionId}:${planFilePath}`,
+			minIntervalMs: 30_000,
+		};
+		pi.events.emit(PLAN_READY_EVENT, event);
+		pi.events.emit(PI_NOTIFY_EVENT, event);
+	}
+
+	function emitPlanClosed(ctx: ExtensionContext, reason: string): void {
+		pi.events.emit(PLAN_CLOSED_EVENT, {
+			v: 1,
+			source: "pi-plan-mode",
+			sessionId: ctx.sessionManager.getSessionId(),
+			planFilePath,
+			reason,
+		});
+	}
+
+	function registerExternalPlanReview(ctx: ExtensionContext, reviewUrl: string | undefined, handleImmediately: boolean): { waitForDecision: () => Promise<PlanReviewDecision>; clear: () => void } {
+		const sessionId = ctx.sessionManager.getSessionId();
+		let settled = false;
+		let resolveDecision!: (decision: PlanReviewDecision) => void;
+		const decisionPromise = new Promise<PlanReviewDecision>((resolve) => {
+			resolveDecision = resolve;
+		});
+		const prompt: ExternalPlanReviewPrompt = {
+			sessionId,
+			planFilePath,
+			reviewUrl,
+			createdAt: Date.now(),
+			submitDecision(action, feedback) {
+				if (settled) return { ok: false, error: "That plan review has already been handled." };
+				if (!planModeEnabled) return { ok: false, error: "Plan mode is not active." };
+				settled = true;
+				getExternalPlanModeBridge().pending.delete(sessionId);
+				const note = feedback?.trim();
+				const decision: PlanReviewDecision = {
+					action,
+					feedback: action === "refine" && note
+						? formatPlanReviewFeedback({ planFilePath, annotations: [], note })
+						: note || undefined,
+					annotations: [],
+				};
+				resolveDecision(decision);
+				if (handleImmediately) {
+					void handleReviewDecision(ctx, decision)
+						.catch((error) => ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"))
+						.finally(() => emitPlanClosed(ctx, action));
+				}
+				return { ok: true };
+			},
+		};
+		getExternalPlanModeBridge().pending.set(sessionId, prompt);
+		return {
+			waitForDecision: () => decisionPromise,
+			clear: () => {
+				if (getExternalPlanModeBridge().pending.get(sessionId) === prompt) {
+					getExternalPlanModeBridge().pending.delete(sessionId);
+				}
+			},
+		};
+	}
+
 	async function handleReviewDecision(ctx: ExtensionContext, decision: PlanReviewDecision): Promise<void> {
 		if (decision.action === "approve") {
 			await executeWithBeadsCoordinator(ctx, decision.feedback);
@@ -271,6 +375,8 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		options: { sendPreviewMessage?: boolean; onPreview?: (preview: string) => void },
 	): Promise<string> {
 		const server = await startPlanReviewServer({ planFilePath, planHtml: content });
+		const externalReview = registerExternalPlanReview(ctx, server.url, false);
+		emitPlanReady(ctx, server.url);
 		openReviewInBrowser(server.url, ctx);
 
 		const preview = buildPlanPreview(false, server.url);
@@ -280,12 +386,14 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		}
 
 		try {
-			const decision = await server.waitForDecision();
+			const decision = await Promise.race([server.waitForDecision(), externalReview.waitForDecision()]);
 			await delay(500);
 			await handleReviewDecision(ctx, decision);
 			return preview;
 		} finally {
+			externalReview.clear();
 			server.stop();
+			emitPlanClosed(ctx, "resolved");
 		}
 	}
 
@@ -325,17 +433,6 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 			return;
 		}
 
-		pi.events.emit(PI_NOTIFY_EVENT, {
-			v: 1,
-			source: "pi-plan-mode",
-			kind: "ready",
-			level: "info",
-			title: "Plan ready",
-			message: `HTML plan ready: ${planFilePath}`,
-			dedupeKey: `plan-ready:${planFilePath}`,
-			minIntervalMs: 30_000,
-		});
-
 		if (!headless) {
 			try {
 				return await presentPlanReview(ctx, content, options);
@@ -349,6 +446,8 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		}
 
 		const preview = buildPlanPreview(headless);
+		registerExternalPlanReview(ctx, undefined, true);
+		emitPlanReady(ctx);
 		options.onPreview?.(preview);
 
 		if (options.sendPreviewMessage !== false) {
