@@ -532,10 +532,14 @@ class BrokerClient {
 async function canConnectToBroker(): Promise<boolean> {
 	return new Promise((resolve) => {
 		const socket = createConnection(BROKER_SOCKET_PATH);
+		let settled = false;
 		const done = (value: boolean): void => {
+			if (settled) return;
+			settled = true;
 			socket.destroy();
 			resolve(value);
 		};
+		socket.setTimeout(300, () => done(false));
 		socket.once("connect", () => done(true));
 		socket.once("error", () => done(false));
 	});
@@ -582,6 +586,8 @@ export default function (pi: ExtensionAPI) {
 	let sessionUpdateInterval: ReturnType<typeof setInterval> | undefined;
 	let assistantStreamId: string | undefined;
 	let compactionInProgress = false;
+	let brokerConnecting = false;
+	let sessionStartupToken = 0;
 	const waitingAskUserToolCalls = new Map<string, unknown>();
 	const forwardedAskUserToolCalls = new Set<string>();
 	const askUserForwardTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -595,6 +601,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (broker.connected && broker.channelName) ctx.ui.setStatus("casper", `#${broker.channelName}`);
 			else if (broker.connected) ctx.ui.setStatus("casper", "casper: connected");
+			else if (brokerConnecting) ctx.ui.setStatus("casper", "casper: connecting");
 			else ctx.ui.setStatus("casper", undefined);
 		} catch (caught) {
 			if (isStaleContextError(caught)) return;
@@ -1319,6 +1326,39 @@ export default function (pi: ExtensionAPI) {
 		updateStatus,
 	);
 
+	function startCasperSession(ctx: ExtensionContext): void {
+		const token = ++sessionStartupToken;
+		brokerConnecting = true;
+		updateStatus(ctx);
+		void initializeCasperSession(ctx, token);
+	}
+
+	async function initializeCasperSession(ctx: ExtensionContext, token: number): Promise<void> {
+		let errorStatusShown = false;
+		try {
+			config = await ensureBrokerSecret(await readConfig());
+			await mkdir(TEMP_DIR, { recursive: true });
+			if (token !== sessionStartupToken) return;
+			if (!config.botToken || !config.appToken) return;
+			await broker.connect(ctx);
+			if (token !== sessionStartupToken) return;
+			startSessionUpdates(ctx);
+			broker.forward({ type: "session_started", timestamp: Date.now() });
+		} catch (error) {
+			if (token !== sessionStartupToken || isStaleContextError(error)) return;
+			const message = error instanceof Error ? error.message : String(error);
+			brokerConnecting = false;
+			updateStatus(ctx, message);
+			errorStatusShown = true;
+			return;
+		} finally {
+			if (token === sessionStartupToken && !errorStatusShown) {
+				brokerConnecting = false;
+				updateStatus(ctx);
+			}
+		}
+	}
+
 	pi.events.on(PLAN_READY_EVENT, (event) => {
 		const ctx = currentCtx;
 		if (!ctx || isEphemeralSession(ctx)) return;
@@ -1400,7 +1440,7 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", (_event, ctx) => {
 		setCurrentCtx(ctx);
 		waitingAskUserToolCalls.clear();
 		forwardedAskUserToolCalls.clear();
@@ -1411,24 +1451,12 @@ export default function (pi: ExtensionAPI) {
 			updateStatus(ctx);
 			return;
 		}
-		config = await ensureBrokerSecret(await readConfig());
-		await mkdir(TEMP_DIR, { recursive: true });
-		if (!config.botToken || !config.appToken) {
-			updateStatus(ctx);
-			return;
-		}
-		try {
-			await broker.connect(ctx);
-			startSessionUpdates(ctx);
-			broker.forward({ type: "session_started", timestamp: Date.now() });
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			updateStatus(ctx, message);
-		}
-		updateStatus(ctx);
+		startCasperSession(ctx);
 	});
 
 	pi.on("session_shutdown", async (event, ctx) => {
+		sessionStartupToken++;
+		brokerConnecting = false;
 		if (broker.connected && event.reason !== "reload") {
 			broker.send({ v: 1, type: "session_closed", sessionId: ctx.sessionManager.getSessionId(), reason: event.reason });
 		}

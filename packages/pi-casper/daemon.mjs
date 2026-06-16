@@ -70,6 +70,7 @@ const askUserPromptIdsByToolCall = new Map();
 const askUserActionRequests = new Map();
 const channelEnsures = new Map();
 const joinedChannels = new Set();
+const invitedChannels = new Set();
 let configuredUserProfile;
 let configuredUserProfileUserId;
 let communicationAgent;
@@ -857,6 +858,7 @@ async function ensureSessionChannelInner(session) {
 		state.channels[mapping.channelId] = session.sessionId;
 		pruneChannelAliases(session.sessionId, mapping.channelId);
 		await ensureBotInChannel(mapping.channelId);
+		await inviteConfiguredUser(mapping.channelId);
 		if (nameChanged) await maybeRenameSessionChannel(session, mapping);
 		if (topicChanged) await setChannelTopic(session, mapping).catch((error) => log(`channel topic failed: ${errorMessage(error)}`));
 		await writeState();
@@ -917,11 +919,13 @@ async function repairMappedChannel(session, mapping) {
 }
 
 function replaceMappedChannel(session, mapping, channelId, channelName, isMember) {
-	delete state.channels[mapping.channelId];
+	const oldChannelId = mapping.channelId;
+	delete state.channels[oldChannelId];
 	mapping.channelId = channelId;
 	mapping.channelName = channelName || mapping.channelName;
 	state.channels[mapping.channelId] = session.sessionId;
-	joinedChannels.delete(mapping.channelId);
+	joinedChannels.delete(oldChannelId);
+	invitedChannels.delete(oldChannelId);
 	if (isMember) joinedChannels.add(mapping.channelId);
 }
 
@@ -1006,9 +1010,16 @@ async function maybeRenameSessionChannel(session, mapping) {
 
 async function inviteConfiguredUser(channelId) {
 	if (!config.userId) return;
-	await callSlack("conversations.invite", { channel: channelId, users: config.userId }).catch((error) => {
+	if (invitedChannels.has(channelId)) return;
+	await callSlack("conversations.invite", { channel: channelId, users: config.userId }).then(() => {
+		invitedChannels.add(channelId);
+	}).catch((error) => {
 		const message = errorMessage(error);
-		if (!message.includes("already_in_channel") && !message.includes("cant_invite_self")) void log(`channel invite failed: ${message}`);
+		if (message.includes("already_in_channel") || message.includes("cant_invite_self")) {
+			invitedChannels.add(channelId);
+			return;
+		}
+		void log(`channel invite failed: ${message}`);
 	});
 }
 
@@ -1030,7 +1041,7 @@ async function archiveSessionChannel(sessionId, reason = "closed", options = {})
 	const shouldArchive = options.archive !== false;
 	const shouldNotify = options.notify !== false;
 	if (shouldArchive && config.archiveOnSessionClose !== false && mapping.channelId && configured()) {
-		await postSlackMessage(mapping.channelId, [sectionBlock(`:black_circle: pi session closed (${escapeMrkdwn(reason)}). Archiving this channel.`)], `pi session closed (${reason})`).catch(() => undefined);
+		if (shouldNotify) await postSlackMessage(mapping.channelId, [sectionBlock(`:black_circle: pi session closed (${escapeMrkdwn(reason)}). Archiving this channel.`)], `pi session closed (${reason})`).catch(() => undefined);
 		try {
 			await callSlack("conversations.archive", { channel: mapping.channelId });
 			mapping.state = "archived";
@@ -2599,7 +2610,7 @@ function sweepStaleSessions() {
 	for (const [sessionId, session] of sessions) {
 		if (session.lastSeen < cutoff || !session.socket.writable) {
 			sessions.delete(sessionId);
-			void archiveSessionChannel(sessionId, "stale", { archive: false, notify: false }).catch((error) => log(`stale close failed: ${errorMessage(error)}`));
+			void archiveSessionChannel(sessionId, "stale", { notify: false }).catch((error) => log(`stale close failed: ${errorMessage(error)}`));
 		}
 	}
 	void writeStatus();
