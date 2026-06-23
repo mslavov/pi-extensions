@@ -13,3 +13,5 @@ dist/
 .dolt/
 *.db
 .beads-credential-key
+
+__pycache__/

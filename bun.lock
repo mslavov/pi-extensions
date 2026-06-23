@@ -10,7 +10,7 @@
         "@earendil-works/pi-tui": "^0.74.0",
       },
       "devDependencies": {
-        "harness-evals": "^0.1.1",
+        "harness-evals": "^0.2.3",
         "turbo": "^2.9.6",
         "typescript": "^6.0.2",
         "vitest": "^4.1.5",
@@ -841,7 +841,7 @@
 
     "graceful-fs": ["graceful-fs@4.2.11", "", {}, "sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ=="],
 
-    "harness-evals": ["harness-evals@0.1.1", "", { "dependencies": { "@earendil-works/pi-ai": "^0.74.0", "fast-glob": "^3.3.3", "yaml": "^2.8.2" }, "bin": { "harness-evals": "dist/cli.js" } }, "sha512-OAEh3Kb4wyZ/V2hRSBx+j1U5AG/JiuAnoIcR7Ui/J/TD7bsVLoscu1Yi5NLolJ3l/HuGklED4lH8e2fYEDPpnw=="],
+    "harness-evals": ["harness-evals@0.2.3", "", { "dependencies": { "@earendil-works/pi-ai": "^0.74.0", "fast-glob": "^3.3.3", "yaml": "^2.8.2" }, "bin": { "harness-evals": "dist/cli.js" } }, "sha512-aWhnX/PAvPVrPxIvC2tzyoD/8T6oEK5pq/nMj+oaemBE8eU4XoC0GBWYdWEQCT68/Jr70w7AXxhBeC5Uqt/2+g=="],
 
     "has-flag": ["has-flag@4.0.0", "", {}, "sha512-EykJT/Q1KjTWctppgIAgfSO0tKVuZUjhgMr17kqTumMl6Afv3EISleU7qZUzoXDFTAHTDC4NOoG/ZxU3EvlMPQ=="],
 

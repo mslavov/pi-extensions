@@ -5,7 +5,7 @@ import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
+import { isContextOverflow, type ImageContent, type TextContent } from "@earendil-works/pi-ai";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { stripFrontmatter, type ExtensionAPI, type ExtensionContext, type SlashCommandInfo } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -55,6 +55,7 @@ interface PendingSlackTurn {
 
 type ActiveSlackTurn = PendingSlackTurn;
 type PiTextMessage = AgentMessage & { role?: string };
+type AssistantTurnResult = AgentMessage & { role: "assistant"; stopReason?: string; errorMessage?: string };
 type UserMessageDelivery = "steer" | "followUp";
 type CompactionReason = "manual" | "threshold" | "overflow";
 
@@ -114,6 +115,8 @@ interface PlanClosedEvent {
 const SESSION_UPDATE_INTERVAL_MS = 5_000;
 const SESSION_HISTORY_LIMIT = 12;
 const SESSION_HISTORY_TEXT_LIMIT = 800;
+const TERMINAL_AGENT_ERROR_GRACE_MS = 750;
+const RECOVERABLE_AGENT_ERROR_GRACE_MS = 90_000;
 const ASK_USER_BRIDGE_SYMBOL = Symbol.for("pi-ask-user:external-bridge:v1");
 const PLAN_MODE_BRIDGE_SYMBOL = Symbol.for("pi-plan-mode:external-bridge:v1");
 const PLAN_READY_EVENT = "pi:plan-mode:ready";
@@ -377,7 +380,10 @@ class BrokerClient {
 	}
 
 	sendSessionUpdate(ctx: ExtensionContext): void {
-		if (!this.connected) return;
+		if (!this.connected) {
+			if (!this.manuallyClosed) this.scheduleReconnect(ctx);
+			return;
+		}
 		this.send({ v: 1, type: "session_update", ...this.getSnapshot(ctx) });
 	}
 
@@ -592,6 +598,8 @@ export default function (pi: ExtensionAPI) {
 	const forwardedAskUserToolCalls = new Set<string>();
 	const askUserForwardTimers = new Map<string, ReturnType<typeof setTimeout>>();
 	const slackPromptTexts = new Set<string>();
+	let pendingAgentFinishedTimer: ReturnType<typeof setTimeout> | undefined;
+	let pendingAgentFinishedToken = 0;
 
 	function updateStatus(ctx: ExtensionContext, error?: string): void {
 		try {
@@ -710,6 +718,53 @@ export default function (pi: ExtensionAPI) {
 
 	function forwardCasperNotice(text: string, attention = true): void {
 		broker.forward({ type: "message_end", timestamp: Date.now(), message: { role: "custom", customType: "pi-casper", content: text, display: true }, attention });
+	}
+
+	function clearPendingAgentFinished(): void {
+		pendingAgentFinishedToken++;
+		if (!pendingAgentFinishedTimer) return;
+		clearTimeout(pendingAgentFinishedTimer);
+		pendingAgentFinishedTimer = undefined;
+	}
+
+	function forwardAgentFinished(forwarded: Extract<CasperForwardedEvent, { type: "agent_finished" }>, ctx: ExtensionContext, assistant?: AssistantTurnResult): void {
+		clearPendingAgentFinished();
+		const delayMs = agentFinishedDelayMs(forwarded, ctx, assistant);
+		if (delayMs === 0) {
+			broker.forward(forwarded);
+			return;
+		}
+
+		const token = ++pendingAgentFinishedToken;
+		pendingAgentFinishedTimer = setTimeout(() => {
+			if (token !== pendingAgentFinishedToken) return;
+			pendingAgentFinishedTimer = undefined;
+			broker.forward(forwarded);
+		}, delayMs);
+		pendingAgentFinishedTimer.unref?.();
+	}
+
+	function agentFinishedDelayMs(forwarded: Extract<CasperForwardedEvent, { type: "agent_finished" }>, ctx: ExtensionContext, assistant?: AssistantTurnResult): number {
+		if (forwarded.stopReason !== "error") return 0;
+		return isRecoverableAssistantError(assistant, ctx) ? RECOVERABLE_AGENT_ERROR_GRACE_MS : TERMINAL_AGENT_ERROR_GRACE_MS;
+	}
+
+	function isRecoverableAssistantError(message: AssistantTurnResult | undefined, ctx: ExtensionContext): boolean {
+		if (!message?.errorMessage || message.stopReason !== "error") return false;
+		return isContextOverflowAssistant(message, ctx) || isRetryableAgentError(message.errorMessage);
+	}
+
+	function isContextOverflowAssistant(message: AssistantTurnResult, ctx: ExtensionContext): boolean {
+		try {
+			return isContextOverflow(message as Parameters<typeof isContextOverflow>[0], ctx.model?.contextWindow ?? 0);
+		} catch {
+			return /context.?overflow|context.?window|context.?length|maximum.?context|token.?limit|too many tokens/i.test(message.errorMessage || "");
+		}
+	}
+
+	function isRetryableAgentError(message: string): boolean {
+		if (/GoUsageLimitError|FreeUsageLimitError|Monthly usage limit reached|available balance|insufficient_quota|out of budget|quota exceeded|billing/i.test(message)) return false;
+		return /overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|network.?error|connection.?error|connection.?refused|connection.?lost|websocket.?closed|websocket.?error|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|ended without|stream ended before message_stop|http2 request did not get a response|timed? out|timeout|terminated|retry delay/i.test(message);
 	}
 
 	function forwardCompactionStart(reason?: CompactionReason): void {
@@ -1457,6 +1512,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", async (event, ctx) => {
 		sessionStartupToken++;
 		brokerConnecting = false;
+		clearPendingAgentFinished();
 		if (broker.connected && event.reason !== "reload") {
 			broker.send({ v: 1, type: "session_closed", sessionId: ctx.sessionManager.getSessionId(), reason: event.reason });
 		}
@@ -1476,12 +1532,14 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("before_agent_start", async (event, ctx) => {
 		setCurrentCtx(ctx);
+		clearPendingAgentFinished();
 		maybeNameSessionFromPrompt(event.prompt, ctx);
 		return { systemPrompt: `${event.systemPrompt}${SYSTEM_PROMPT_SUFFIX}` };
 	});
 
 	pi.on("agent_start", async (_event, ctx) => {
 		setCurrentCtx(ctx);
+		clearPendingAgentFinished();
 		currentAbort = () => {
 			try {
 				ctx.abort();
@@ -1501,6 +1559,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("message_start", async (event, _ctx) => {
 		if (isAssistantMessage(event.message as PiTextMessage)) {
+			clearPendingAgentFinished();
 			assistantStreamId = randomUUID();
 			broker.forward({ type: "message_start", timestamp: Date.now(), streamId: assistantStreamId, message: event.message });
 		}
@@ -1528,6 +1587,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_compact", async (event, ctx) => {
 		setCurrentCtx(ctx);
+		clearPendingAgentFinished();
 		forwardCompactionEnd({
 			result: {
 				summary: event.compactionEntry.summary,
@@ -1597,14 +1657,14 @@ export default function (pi: ExtensionAPI) {
 		currentAbort = undefined;
 		const turn = activeSlackTurn;
 		activeSlackTurn = undefined;
-		const lastAssistant = [...event.messages].reverse().find((message) => (message as { role?: string }).role === "assistant") as { stopReason?: string; errorMessage?: string } | undefined;
-		broker.forward({
+		const lastAssistant = [...event.messages].reverse().find((message) => (message as { role?: string }).role === "assistant") as AssistantTurnResult | undefined;
+		forwardAgentFinished({
 			type: "agent_finished",
 			timestamp: Date.now(),
 			stopReason: lastAssistant?.stopReason,
 			errorMessage: lastAssistant?.errorMessage,
 			attention: true,
-		});
+		}, ctx, lastAssistant);
 		if (queuedSlackTurns.length > 0 && !preserveQueuedTurnsAsHistory) sendUserMessageSafely(queuedSlackTurns[0].content);
 		if (turn) preserveQueuedTurnsAsHistory = false;
 		broker.sendSessionUpdate(ctx);

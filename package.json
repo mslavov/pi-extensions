@@ -14,7 +14,7 @@
     "agent:fix-evals": "npm exec --yes --package=@earendil-works/pi-coding-agent@latest -- pi -p --no-session --no-extensions --no-skills --no-context-files --tools read,bash,edit,write,grep,find,ls"
   },
   "devDependencies": {
-    "harness-evals": "^0.1.1",
+    "harness-evals": "^0.2.3",
     "turbo": "^2.9.6",
     "typescript": "^6.0.2",
     "vitest": "^4.1.5"

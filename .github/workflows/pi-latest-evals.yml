@@ -68,7 +68,59 @@ jobs:
       - name: Run latest-Pi harness evals
         id: latest_pi_evals
         continue-on-error: true
-        run: bun run evals:pi -- --provider "$PI_PROVIDER" --model "$PI_MODEL"
+        env:
+          HARNESS_EVALS_CLEANUP: "0"
+        run: |
+          set +e
+          bun run evals:pi -- --provider "$PI_PROVIDER" --model "$PI_MODEL"
+          eval_status=$?
+          python3 .github/scripts/sync-pi-auth-from-harness.py --once --cleanup || true
+          exit "$eval_status"
+
+      - name: Persist refreshed Pi Codex auth
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.PI_CODEX_AUTH_SECRET_WRITE_TOKEN }}
+          PI_CODEX_AUTH_JSON_B64: ${{ secrets.PI_CODEX_AUTH_JSON_B64 }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "PI_CODEX_AUTH_SECRET_WRITE_TOKEN secret is not configured; skipping auth secret update"
+            exit 0
+          fi
+
+          auth_file="$HOME/.pi/agent/auth.json"
+          if [[ ! -s "$auth_file" ]]; then
+            echo "Pi Codex auth file is missing; skipping auth secret update"
+            exit 0
+          fi
+
+          jq -e '
+            type == "object" and
+            (keys == ["openai-codex"]) and
+            ."openai-codex".type == "oauth" and
+            (."openai-codex".access | type == "string" and length > 0) and
+            (."openai-codex".refresh | type == "string" and length > 0)
+          ' "$auth_file" >/dev/null
+
+          current_auth="$(jq -c . "$auth_file")"
+          original_auth="$(printf '%s' "$PI_CODEX_AUTH_JSON_B64" | base64 --decode | jq -c .)"
+
+          if [[ "$current_auth" == "$original_auth" ]]; then
+            echo "Pi Codex auth did not change; skipping auth secret update"
+            exit 0
+          fi
+
+          access_token="$(jq -r '."openai-codex".access' "$auth_file")"
+          refresh_token="$(jq -r '."openai-codex".refresh' "$auth_file")"
+          echo "::add-mask::$access_token"
+          echo "::add-mask::$refresh_token"
+
+          encoded_auth="$(printf '%s' "$current_auth" | python3 -c 'import base64, sys; print(base64.b64encode(sys.stdin.buffer.read()).decode())')"
+          echo "::add-mask::$encoded_auth"
+          printf '%s' "$encoded_auth" | gh secret set PI_CODEX_AUTH_JSON_B64 --repo "$GITHUB_REPOSITORY"
+          echo "Updated PI_CODEX_AUTH_JSON_B64 with refreshed Pi Codex auth"
 
       - name: Record eval status
         id: evals_status
@@ -197,12 +249,16 @@ jobs:
 
       - name: Run post-repair verification
         id: verify
+        env:
+          HARNESS_EVALS_CLEANUP: "0"
         run: |
           set +e
           bun run check
           check_status=$?
+
           bun run evals:pi -- --provider "$PI_PROVIDER" --model "$PI_MODEL"
           eval_status=$?
+          python3 .github/scripts/sync-pi-auth-from-harness.py --once --cleanup || true
 
           echo "check_status=$check_status" >> "$GITHUB_OUTPUT"
           echo "eval_status=$eval_status" >> "$GITHUB_OUTPUT"
@@ -212,6 +268,51 @@ jobs:
           else
             echo "passed=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Persist refreshed Pi Codex auth
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.PI_CODEX_AUTH_SECRET_WRITE_TOKEN }}
+          PI_CODEX_AUTH_JSON_B64: ${{ secrets.PI_CODEX_AUTH_JSON_B64 }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "PI_CODEX_AUTH_SECRET_WRITE_TOKEN secret is not configured; skipping auth secret update"
+            exit 0
+          fi
+
+          auth_file="$HOME/.pi/agent/auth.json"
+          if [[ ! -s "$auth_file" ]]; then
+            echo "Pi Codex auth file is missing; skipping auth secret update"
+            exit 0
+          fi
+
+          jq -e '
+            type == "object" and
+            (keys == ["openai-codex"]) and
+            ."openai-codex".type == "oauth" and
+            (."openai-codex".access | type == "string" and length > 0) and
+            (."openai-codex".refresh | type == "string" and length > 0)
+          ' "$auth_file" >/dev/null
+
+          current_auth="$(jq -c . "$auth_file")"
+          original_auth="$(printf '%s' "$PI_CODEX_AUTH_JSON_B64" | base64 --decode | jq -c .)"
+
+          if [[ "$current_auth" == "$original_auth" ]]; then
+            echo "Pi Codex auth did not change; skipping auth secret update"
+            exit 0
+          fi
+
+          access_token="$(jq -r '."openai-codex".access' "$auth_file")"
+          refresh_token="$(jq -r '."openai-codex".refresh' "$auth_file")"
+          echo "::add-mask::$access_token"
+          echo "::add-mask::$refresh_token"
+
+          encoded_auth="$(printf '%s' "$current_auth" | python3 -c 'import base64, sys; print(base64.b64encode(sys.stdin.buffer.read()).decode())')"
+          echo "::add-mask::$encoded_auth"
+          printf '%s' "$encoded_auth" | gh secret set PI_CODEX_AUTH_JSON_B64 --repo "$GITHUB_REPOSITORY"
+          echo "Updated PI_CODEX_AUTH_JSON_B64 with refreshed Pi Codex auth"
 
       - name: Create or update repair PR
         id: cpr

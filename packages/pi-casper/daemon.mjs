@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { createConnection, createServer } from "node:net";
 import { appendFile, mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { basename, extname, join } from "node:path";
+import { basename, dirname, extname, join, resolve as resolvePath } from "node:path";
 import { homedir } from "node:os";
 import { randomBytes, randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
@@ -32,6 +32,7 @@ const COMMUNICATION_AGENT_SESSION_DIR = join(CASPER_DIR, "communication-agent");
 const DEFAULT_CHANNEL_PREFIX = "pi";
 const SESSION_STALE_MS = 30_000;
 const SESSION_SWEEP_MS = 10_000;
+const CHANNEL_INFO_CACHE_MS = 60_000;
 const SLACK_SECTION_TEXT_LIMIT = 2900;
 const SLACK_BLOCK_LIMIT = 48;
 const SLACK_MAX_FIELDS_PER_SECTION = 10;
@@ -69,6 +70,7 @@ const askUserPrompts = new Map();
 const askUserPromptIdsByToolCall = new Map();
 const askUserActionRequests = new Map();
 const channelEnsures = new Map();
+const channelInfoCache = new Map();
 const joinedChannels = new Set();
 const invitedChannels = new Set();
 let configuredUserProfile;
@@ -844,7 +846,7 @@ async function ensureSessionChannel(session) {
 async function ensureSessionChannelInner(session) {
 	let mapping = state.sessions[session.sessionId];
 	if (mapping?.channelId) {
-		await repairMappedChannel(session, mapping);
+		await repairMappedChannel(mapping).catch((error) => log(`channel repair skipped: ${errorMessage(error)}`));
 		const topicChanged = mapping.cwd !== session.cwd || mapping.sessionFile !== session.sessionFile;
 		const nameChanged = mapping.sessionName !== session.sessionName;
 		mapping.cwd = session.cwd;
@@ -889,60 +891,27 @@ async function ensureSessionChannelInner(session) {
 	return mapping;
 }
 
-async function repairMappedChannel(session, mapping) {
-	const desiredName = channelNameForSession(session);
-	if (mapping.channelName !== desiredName) {
-		const canonical = await findReusableChannelByName(desiredName);
-		if (canonical && canonical.id !== mapping.channelId) {
-			replaceMappedChannel(session, mapping, canonical.id, canonical.name || desiredName, canonical.is_member);
-			return;
-		}
-	}
-
+async function repairMappedChannel(mapping) {
 	const info = await getChannelInfo(mapping.channelId).catch(() => undefined);
-	if (!info?.is_archived && mapping.state !== "archived") return;
-	const replacement = await findReusableChannelByName(mapping.channelName || desiredName) ?? await findReusableChannelByName(desiredName);
-	if (replacement) {
-		replaceMappedChannel(session, mapping, replacement.id, replacement.name || mapping.channelName || desiredName, replacement.is_member);
+	if (!info || !info.is_archived) return;
+	if (!info.is_member) {
+		await log(`mapped channel is archived and bot is not a member; leaving mapping unchanged channel=${mapping.channelId}`);
 		return;
 	}
-	if (mapping.channelId) {
-		try {
-			await callSlack("conversations.unarchive", { channel: mapping.channelId });
-			return;
-		} catch (error) {
-			await log(`channel unarchive failed: ${errorMessage(error)}`);
-		}
+	try {
+		await callSlack("conversations.unarchive", { channel: mapping.channelId });
+		channelInfoCache.delete(mapping.channelId);
+	} catch (error) {
+		await log(`channel unarchive failed: ${errorMessage(error)}`);
 	}
-	const created = await createSessionChannel(session);
-	replaceMappedChannel(session, mapping, created.channel.id, created.channel.name || desiredName, true);
-}
-
-function replaceMappedChannel(session, mapping, channelId, channelName, isMember) {
-	const oldChannelId = mapping.channelId;
-	delete state.channels[oldChannelId];
-	mapping.channelId = channelId;
-	mapping.channelName = channelName || mapping.channelName;
-	state.channels[mapping.channelId] = session.sessionId;
-	joinedChannels.delete(oldChannelId);
-	invitedChannels.delete(oldChannelId);
-	if (isMember) joinedChannels.add(mapping.channelId);
 }
 
 async function getChannelInfo(channelId) {
+	const cached = channelInfoCache.get(channelId);
+	if (cached && cached.expiresAt > now()) return cached.channel;
 	const result = await callSlack("conversations.info", { channel: channelId });
+	channelInfoCache.set(channelId, { channel: result.channel, expiresAt: now() + CHANNEL_INFO_CACHE_MS });
 	return result.channel;
-}
-
-async function findReusableChannelByName(channelName) {
-	const result = await callSlack("conversations.list", {
-		types: config.privateChannels === true ? "private_channel" : "public_channel",
-		exclude_archived: false,
-		limit: 200,
-	});
-	const channels = Array.isArray(result.channels) ? result.channels : [];
-	return channels.find((channel) => channel.name === channelName && !channel.is_archived && channel.is_member)
-		?? channels.find((channel) => channel.name === channelName && !channel.is_archived);
 }
 
 async function ensureBotInChannel(channelId) {
@@ -1044,11 +1013,19 @@ async function archiveSessionChannel(sessionId, reason = "closed", options = {})
 		if (shouldNotify) await postSlackMessage(mapping.channelId, [sectionBlock(`:black_circle: pi session closed (${escapeMrkdwn(reason)}). Archiving this channel.`)], `pi session closed (${reason})`).catch(() => undefined);
 		try {
 			await callSlack("conversations.archive", { channel: mapping.channelId });
+			channelInfoCache.delete(mapping.channelId);
 			mapping.state = "archived";
 			mapping.archivedAt = now();
 		} catch (error) {
-			lastError = errorMessage(error);
-			await log(`channel archive failed: ${lastError}`);
+			const message = errorMessage(error);
+			if (message.includes("already_archived")) {
+				channelInfoCache.delete(mapping.channelId);
+				mapping.state = "archived";
+				mapping.archivedAt = now();
+			} else {
+				lastError = message;
+				await log(`channel archive failed: ${lastError}`);
+			}
 		}
 	} else if (shouldNotify && mapping.channelId && configured()) {
 		await postSlackMessage(mapping.channelId, [sectionBlock(`:black_circle: pi session closed (${escapeMrkdwn(reason)}).`)], `pi session closed (${reason})`).catch(() => undefined);
@@ -1084,33 +1061,30 @@ async function postForwardedEvent(client, forwarded) {
 	}
 	if (forwarded.type === "message_end" && forwarded.streamId) {
 		const posted = await updateAssistantTurnMessage(client, channel, forwarded, true);
-		if (posted) {
-			await finalizeToolSummaryMessage(client.sessionId);
-			clearToolSummaryMessage(client.sessionId);
-		}
+		if (posted) await finalizeAndClearToolSummaryMessage(client.sessionId);
 		return;
 	}
 	if (forwarded.type === "message_end") {
 		if (isAssistantMessagePayload(forwarded.message)) {
 			const posted = await updateAssistantTurnMessage(client, channel, forwarded, true);
-			if (posted) {
-				await finalizeToolSummaryMessage(client.sessionId);
-				clearToolSummaryMessage(client.sessionId);
-			}
+			if (posted) await finalizeAndClearToolSummaryMessage(client.sessionId);
 			return;
 		}
-			if (isUserMessagePayload(forwarded.message)) {
-				await postSlackUserMessage(channel, userMessageBlocks(forwarded.message), fallbackTextForUserMessage(forwarded.message));
-				return;
-			}
-			if (isCasperNoticePayload(forwarded.message)) {
-				const text = fallbackTextForCasperNotice(forwarded.message);
-				await postSlackMessage(channel, textSectionBlocks(text), mentionForAttention(text, Boolean(forwarded.attention)));
-				return;
-			}
+		if (isUserMessagePayload(forwarded.message)) {
+			await finalizeAndClearToolSummaryMessage(client.sessionId);
+			await postSlackUserMessage(channel, userMessageBlocks(forwarded.message), fallbackTextForUserMessage(forwarded.message));
 			return;
 		}
+		if (isCasperNoticePayload(forwarded.message)) {
+			await finalizeAndClearToolSummaryMessage(client.sessionId);
+			const text = fallbackTextForCasperNotice(forwarded.message);
+			await postSlackMessage(channel, textSectionBlocks(text), mentionForAttention(text, Boolean(forwarded.attention)));
+			return;
+		}
+		return;
+	}
 	if (forwarded.type === "compaction_start") {
+		await finalizeAndClearToolSummaryMessage(client.sessionId);
 		await updateCompactionMessage(client.sessionId, channel, forwarded);
 		return;
 	}
@@ -1119,20 +1093,23 @@ async function postForwardedEvent(client, forwarded) {
 		return;
 	}
 	if (forwarded.type === "plan_ready") {
+		await finalizeAndClearToolSummaryMessage(client.sessionId);
 		await postPlanReview(client, channel, forwarded);
 		return;
 	}
 	if (forwarded.type === "plan_closed") {
+		await finalizeAndClearToolSummaryMessage(client.sessionId);
 		closePlanReview(client.sessionId, forwarded.planFilePath, forwarded.reason);
 		return;
 	}
 	if (forwarded.type === "tool_waiting") {
+		await finalizeAndClearToolSummaryMessage(client.sessionId);
 		const fallback = forwarded.text || "ask_user is waiting for input.";
 		await postAskUserPrompt(client, channel, forwarded, fallback);
 		return;
 	}
 	if (forwarded.type === "tool_start") {
-		await updateToolSummaryMessage(client.sessionId, channel, forwarded.toolName);
+		await updateToolSummaryMessage(client.sessionId, channel, forwarded.toolName, forwarded.args, client.cwd);
 		return;
 	}
 	if (forwarded.type === "tool_end") {
@@ -1140,12 +1117,13 @@ async function postForwardedEvent(client, forwarded) {
 		return;
 	}
 	if (forwarded.type === "agent_started") {
+		await finalizeAndClearToolSummaryMessage(client.sessionId);
 		clearAssistantTurnMessage(client.sessionId);
-		clearToolSummaryMessage(client.sessionId);
 		clearCompactionMessage(client.sessionId);
 		return;
 	}
 	if (forwarded.type === "agent_finished") {
+		await finalizeAndClearToolSummaryMessage(client.sessionId);
 		await postAgentFinished(channel, forwarded);
 		return;
 	}
@@ -1200,7 +1178,7 @@ async function postAgentFinished(channel, forwarded) {
 
 function agentFinishedText(forwarded) {
 	if (forwarded.stopReason === "aborted") return ":black_circle: Agent turn stopped.";
-	if (forwarded.errorMessage) return `:warning: Agent turn ended with an error: ${escapeMrkdwn(clip(forwarded.errorMessage, 300))}`;
+	if (forwarded.stopReason === "error" && forwarded.errorMessage) return `:warning: Agent turn ended with an error: ${escapeMrkdwn(clip(forwarded.errorMessage, 300))}`;
 	if (forwarded.stopReason === "error") return ":warning: Agent turn ended with an error.";
 	return ":white_check_mark: Agent turn finished.";
 }
@@ -1967,7 +1945,7 @@ function isCasperNoticePayload(message) {
 function shouldPostMessage(message) {
 	const value = message && typeof message === "object" ? message : {};
 	if (value.role !== "assistant") return true;
-	return messageHasVisibleContent(value) || Boolean((value.stopReason === "error" || value.stopReason === "aborted") && value.errorMessage);
+	return messageHasVisibleContent(value);
 }
 
 function shouldPostAssistantTurn(entry) {
@@ -2038,7 +2016,6 @@ function appendMessageContentBlocks(blocks, value) {
 			if (block.type === "text") blocks.push(...textSectionBlocks(block.text || ""));
 		}
 	}
-	if (value.stopReason === "error" && value.errorMessage) blocks.push(sectionBlock(`:warning: ${escapeMrkdwn(value.errorMessage)}`));
 }
 
 function fallbackTextForAssistantTurn(entry) {
@@ -2132,17 +2109,15 @@ function fallbackTextForUserMessage(message) {
 	return text || "User message";
 }
 
-async function updateToolSummaryMessage(sessionId, channel, toolName) {
+async function updateToolSummaryMessage(sessionId, channel, toolName, args, cwd) {
 	let entry = toolSummaryMessages.get(sessionId);
 	if (!entry || entry.finalized) {
 		entry = { channel, ts: undefined, labels: new Set(), count: 0, finalized: false };
 		toolSummaryMessages.set(sessionId, entry);
 	}
-	const before = entry.labels.size;
 	entry.channel = channel;
 	entry.count += 1;
-	entry.labels.add(toolActivityLabel(toolName));
-	if (entry.ts && entry.labels.size === before) return;
+	entry.labels.add(toolActivityLabel(toolName, args, cwd));
 	await postOrUpdateToolSummaryMessage(entry, false);
 }
 
@@ -2151,6 +2126,11 @@ async function finalizeToolSummaryMessage(sessionId) {
 	if (!entry || entry.finalized) return;
 	await postOrUpdateToolSummaryMessage(entry, true);
 	entry.finalized = true;
+}
+
+async function finalizeAndClearToolSummaryMessage(sessionId) {
+	await finalizeToolSummaryMessage(sessionId);
+	clearToolSummaryMessage(sessionId);
 }
 
 async function postOrUpdateToolSummaryMessage(entry, final) {
@@ -2243,14 +2223,25 @@ function toolSummaryBlocks(entry, final) {
 }
 
 function toolSummaryText(entry, final) {
+	const labels = [...entry.labels];
+	const skillNames = labels.map(skillNameFromActivityLabel).filter(Boolean);
+	if (skillNames.length > 0 && skillNames.length === labels.length) {
+		const icon = final ? ":white_check_mark:" : ":books:";
+		const verb = final ? "Read" : "Reading";
+		const subject = skillNames.length === 1 ? "skill" : "skills";
+		const repeatedReads = entry.count > skillNames.length ? ` · ${entry.count} reads` : "";
+		return `${icon} ${verb} ${subject}: ${skillNames.join(", ")}${repeatedReads}`;
+	}
 	const prefix = final ? ":white_check_mark: Worked on" : ":hammer_and_wrench: Working on";
-	const labels = [...entry.labels].join(", ") || "the task";
+	const labelText = labels.join(", ") || "the task";
 	const count = entry.count === 1 ? "1 tool call" : `${entry.count} tool calls`;
-	return `${prefix}: ${labels} · ${count}`;
+	return `${prefix}: ${labelText} · ${count}`;
 }
 
-function toolActivityLabel(toolName) {
+function toolActivityLabel(toolName, args, cwd) {
 	const name = String(toolName || "tool");
+	const skillName = name === "read" ? skillNameFromReadArgs(args, cwd) : undefined;
+	if (skillName) return `reading skill ${skillName}`;
 	if (["read", "grep", "find", "ls", "code_search"].includes(name)) return "reading and searching";
 	if (["exec_command", "bash", "write_stdin", "list_background_bash", "wait_background_bash"].includes(name)) return "running commands";
 	if (["apply_patch", "edit", "write"].includes(name)) return "editing files";
@@ -2258,6 +2249,25 @@ function toolActivityLabel(toolName) {
 	if (["Agent", "get_subagent_result", "steer_subagent"].includes(name)) return "delegating work";
 	if (name === "ask_user") return "asking for input";
 	return `using ${name}`;
+}
+
+function skillNameFromActivityLabel(label) {
+	const prefix = "reading skill ";
+	return label.startsWith(prefix) ? label.slice(prefix.length) : undefined;
+}
+
+function skillNameFromReadArgs(args, cwd) {
+	const path = toolArgsPath(args);
+	if (!path) return undefined;
+	const absolutePath = resolvePath(cwd || "", path);
+	if (basename(absolutePath) !== "SKILL.md") return undefined;
+	return basename(dirname(absolutePath)) || "SKILL.md";
+}
+
+function toolArgsPath(args) {
+	if (!args || typeof args !== "object") return undefined;
+	const value = args.path ?? args.file_path;
+	return typeof value === "string" ? value : undefined;
 }
 
 function textSectionBlocks(text, limit = SLACK_SECTION_TEXT_LIMIT) {
@@ -2566,7 +2576,7 @@ async function handleClientMessage(client, message) {
 
 function setupSocketServer() {
 	server = createServer((socket) => {
-		const client = { socket, authenticated: false, buffer: "", lastSeen: now() };
+		const client = { socket, authenticated: false, buffer: "", lastSeen: now(), messageQueue: Promise.resolve() };
 		socket.setEncoding("utf8");
 		socket.on("data", (chunk) => {
 			client.buffer += chunk;
@@ -2577,7 +2587,9 @@ function setupSocketServer() {
 				if (!line) continue;
 				try {
 					const message = JSON.parse(line);
-					void handleClientMessage(client, message).catch((error) => log(`client message failed: ${errorMessage(error)}`));
+					client.messageQueue = client.messageQueue
+						.then(() => handleClientMessage(client, message))
+						.catch((error) => log(`client message failed: ${errorMessage(error)}`));
 				} catch (error) {
 					void log(`invalid client JSON: ${errorMessage(error)}`);
 				}
