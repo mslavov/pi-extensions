@@ -1,5 +1,5 @@
 import { StringEnum } from "@earendil-works/pi-ai";
-import { type AgentToolResult, type BashToolDetails, createBashTool, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import { type AgentToolResult, type BashToolDetails, createBashTool, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext, type ToolInfo } from "@earendil-works/pi-coding-agent";
 import { Key, Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import { normalizeBackgroundCommand } from "./command-normalizer.js";
@@ -9,6 +9,7 @@ import { BackgroundBashOverlay } from "./ui/background-bash-overlay.js";
 
 const STATUS_VALUES = ["running", "completed", "failed", "killed", "unknown", "all"] as const;
 const SIGNAL_VALUES = ["SIGTERM", "SIGKILL"] as const;
+const CODEX_CONVERSION_TOOL_NAMES = ["exec_command", "write_stdin"] as const;
 
 const BashParams = Type.Object({
 	command: Type.String({ description: "Bash command to execute" }),
@@ -118,9 +119,22 @@ function formatWaitResult(job: BackgroundBashJob, timedOut: boolean): string {
 	return `${heading}\n\n${formatJobDetails(job)}\n\nUse the read tool on the Log path to inspect output.`;
 }
 
+function isCodexConversionTool(tool: ToolInfo | undefined): boolean {
+	if (!tool) return false;
+	const source = [tool.sourceInfo.source, tool.sourceInfo.path, tool.sourceInfo.baseDir].filter(Boolean).join(" ").toLowerCase();
+	return source.includes("pi-codex-conversion");
+}
+
+function hasCodexConversionShellTools(pi: ExtensionAPI): boolean {
+	const tools = pi.getAllTools();
+	return CODEX_CONVERSION_TOOL_NAMES.every((name) => isCodexConversionTool(tools.find((tool) => tool.name === name)));
+}
+
 export default function backgroundBashExtension(pi: ExtensionAPI): void {
 	const manager = new BackgroundBashManager();
 	const foregroundBash = createBashTool(process.cwd());
+	let toolsRegistered = false;
+	let controlsRegistered = false;
 	let statusTarget: StatusTarget | undefined;
 	let statusPollTimer: ReturnType<typeof setInterval> | undefined;
 	let statusUpdateRunning = false;
@@ -187,125 +201,146 @@ export default function backgroundBashExtension(pi: ExtensionAPI): void {
 		await updateStatus(target);
 	};
 
-	pi.on("session_start", async (_event, ctx) => {
+	const registerTools = () => {
+		if (toolsRegistered) return;
+		toolsRegistered = true;
+
+		pi.registerTool({
+			name: "bash",
+			label: "bash",
+			description:
+				"Execute a bash command in the current working directory. Set background: true for long-running commands; output is written to a project-local log file that can be inspected with read.",
+			promptSnippet: "Execute bash commands, optionally as detached background jobs with background: true",
+			promptGuidelines: [
+				"Use bash with background: true for long-running commands such as dev servers, watchers, and scripts the agent should not block on.",
+				"After starting background bash, inspect output with the read tool on the returned Log path; do not use wait_background_bash just to read output.",
+				"Use wait_background_bash only when you need to wait for the job to finish or check whether it has finished.",
+				"Use list_background_bash to discover background jobs started by any pi session in the same project.",
+			],
+			parameters: BashParams,
+			async execute(toolCallId, params, signal, onUpdate, ctx): Promise<AgentToolResult<BashToolDetails | BackgroundBashDetails | undefined>> {
+				if (!params.background) {
+					return foregroundBash.execute(toolCallId, { command: params.command, timeout: params.timeout }, signal, onUpdate);
+				}
+
+				const normalized = normalizeBackgroundCommand(params.command);
+				const cwd = ctx.cwd;
+				const target = createStatusTarget(ctx, cwd);
+				const job = await manager.start(normalized.command, cwd);
+				await updateStatus(target);
+				const notice = normalized.rtkRewriteRemoved
+					? "\n\nRTK rewrite was removed for this background job so output streams directly to the log file."
+					: "";
+				return {
+					content: [{ type: "text", text: `${formatStarted(job)}${notice}` }],
+					details: {
+						background: true,
+						id: job.meta.id,
+						pid: job.status.pid ?? job.meta.pid,
+						status: job.status.status,
+						logPath: job.meta.logPath,
+						infoPath: job.meta.infoPath,
+						jobDir: job.meta.jobDir,
+						command: job.meta.command,
+						originalCommand: normalized.originalCommand,
+						rtkRewriteRemoved: normalized.rtkRewriteRemoved || undefined,
+						cwd: job.meta.cwd,
+						startedAt: job.meta.startedAt,
+					},
+				};
+			},
+			renderCall(args, theme, _context) {
+				const suffix = args.background ? theme.fg("muted", " (background)") : "";
+				return new Text(theme.fg("toolTitle", theme.bold(`$ ${args.command}`)) + suffix, 0, 0);
+			},
+		});
+
+		pi.registerTool({
+			name: "list_background_bash",
+			label: "List Background Bash",
+			description: "List background bash jobs started in this project, including jobs started by other pi sessions.",
+			promptSnippet: "List project-local background bash jobs and their log paths",
+			parameters: ListBackgroundBashParams,
+			async execute(_toolCallId, params: ListBackgroundBashParams, _signal, _onUpdate, ctx) {
+				const cwd = ctx.cwd;
+				const target = createStatusTarget(ctx, cwd);
+				const jobs = await manager.list(cwd, (params.status ?? "all") as BackgroundBashStatusFilter);
+				await updateStatus(target);
+				return {
+					content: [{ type: "text", text: formatJobList(jobs) }],
+					details: { jobs: jobs.map((job) => ({ meta: job.meta, status: job.status })) },
+				};
+			},
+		});
+
+		pi.registerTool({
+			name: "wait_background_bash",
+			label: "Wait Background Bash",
+			description: "Wait for a background bash job to finish, or return current status after a timeout. Does not return output; use read on the Log path for output.",
+			promptSnippet: "Wait for a background bash job and return status plus log path",
+			parameters: WaitBackgroundBashParams,
+			async execute(_toolCallId, params: WaitBackgroundBashParams, signal, _onUpdate, ctx) {
+				const cwd = ctx.cwd;
+				const target = createStatusTarget(ctx, cwd);
+				const result = await manager.wait(cwd, params.id, params.timeout, signal);
+				await updateStatus(target);
+				return {
+					content: [{ type: "text", text: formatWaitResult(result.job, result.timedOut) }],
+					details: { job: result.job, timedOut: result.timedOut },
+				};
+			},
+		});
+
+		pi.registerTool({
+			name: "stop_background_bash",
+			label: "Stop Background Bash",
+			description: "Stop a running background bash job by id and mark it as killed in the project registry.",
+			promptSnippet: "Stop a running background bash job by id",
+			parameters: StopBackgroundBashParams,
+			async execute(_toolCallId, params: StopBackgroundBashParams, _signal, _onUpdate, ctx) {
+				const cwd = ctx.cwd;
+				const target = createStatusTarget(ctx, cwd);
+				const job = await manager.stop(cwd, params.id, params.signal ?? "SIGTERM");
+				await updateStatus(target);
+				return {
+					content: [{ type: "text", text: `Background bash stop result.\n\n${formatJobDetails(job)}` }],
+					details: { job },
+				};
+			},
+		});
+	};
+
+	const registerControls = () => {
+		if (controlsRegistered) return;
+		controlsRegistered = true;
+
+		pi.registerCommand("jobs", {
+			description: "View background bash jobs and logs",
+			handler: async (_args, ctx) => openOverlay(ctx),
+		});
+
+		pi.registerShortcut(Key.ctrlShift("j"), {
+			description: "View background bash jobs and logs",
+			handler: openOverlay,
+		});
+	};
+
+	const enableExtension = (ctx: ExtensionContext) => {
+		if (hasCodexConversionShellTools(pi)) {
+			stopStatusPolling();
+			return;
+		}
+		registerTools();
+		registerControls();
 		startStatusPolling(ctx);
+	};
+
+	pi.on("session_start", async (_event, ctx) => {
+		enableExtension(ctx);
 	});
 
 	pi.on("session_shutdown", async () => {
 		stopStatusPolling();
 	});
 
-	pi.registerTool({
-		name: "bash",
-		label: "bash",
-		description:
-			"Execute a bash command in the current working directory. Set background: true for long-running commands; output is written to a project-local log file that can be inspected with read.",
-		promptSnippet: "Execute bash commands, optionally as detached background jobs with background: true",
-		promptGuidelines: [
-			"Use bash with background: true for long-running commands such as dev servers, watchers, and scripts the agent should not block on.",
-			"After starting background bash, inspect output with the read tool on the returned Log path; do not use wait_background_bash just to read output.",
-			"Use wait_background_bash only when you need to wait for the job to finish or check whether it has finished.",
-			"Use list_background_bash to discover background jobs started by any pi session in the same project.",
-		],
-		parameters: BashParams,
-		async execute(toolCallId, params, signal, onUpdate, ctx): Promise<AgentToolResult<BashToolDetails | BackgroundBashDetails | undefined>> {
-			if (!params.background) {
-				return foregroundBash.execute(toolCallId, { command: params.command, timeout: params.timeout }, signal, onUpdate);
-			}
-
-			const normalized = normalizeBackgroundCommand(params.command);
-			const cwd = ctx.cwd;
-			const target = createStatusTarget(ctx, cwd);
-			const job = await manager.start(normalized.command, cwd);
-			await updateStatus(target);
-			const notice = normalized.rtkRewriteRemoved
-				? "\n\nRTK rewrite was removed for this background job so output streams directly to the log file."
-				: "";
-			return {
-				content: [{ type: "text", text: `${formatStarted(job)}${notice}` }],
-				details: {
-					background: true,
-					id: job.meta.id,
-					pid: job.status.pid ?? job.meta.pid,
-					status: job.status.status,
-					logPath: job.meta.logPath,
-					infoPath: job.meta.infoPath,
-					jobDir: job.meta.jobDir,
-					command: job.meta.command,
-					originalCommand: normalized.originalCommand,
-					rtkRewriteRemoved: normalized.rtkRewriteRemoved || undefined,
-					cwd: job.meta.cwd,
-					startedAt: job.meta.startedAt,
-				},
-			};
-		},
-		renderCall(args, theme, _context) {
-			const suffix = args.background ? theme.fg("muted", " (background)") : "";
-			return new Text(theme.fg("toolTitle", theme.bold(`$ ${args.command}`)) + suffix, 0, 0);
-		},
-	});
-
-	pi.registerTool({
-		name: "list_background_bash",
-		label: "List Background Bash",
-		description: "List background bash jobs started in this project, including jobs started by other pi sessions.",
-		promptSnippet: "List project-local background bash jobs and their log paths",
-		parameters: ListBackgroundBashParams,
-		async execute(_toolCallId, params: ListBackgroundBashParams, _signal, _onUpdate, ctx) {
-			const cwd = ctx.cwd;
-			const target = createStatusTarget(ctx, cwd);
-			const jobs = await manager.list(cwd, (params.status ?? "all") as BackgroundBashStatusFilter);
-			await updateStatus(target);
-			return {
-				content: [{ type: "text", text: formatJobList(jobs) }],
-				details: { jobs: jobs.map((job) => ({ meta: job.meta, status: job.status })) },
-			};
-		},
-	});
-
-	pi.registerTool({
-		name: "wait_background_bash",
-		label: "Wait Background Bash",
-		description: "Wait for a background bash job to finish, or return current status after a timeout. Does not return output; use read on the Log path for output.",
-		promptSnippet: "Wait for a background bash job and return status plus log path",
-		parameters: WaitBackgroundBashParams,
-		async execute(_toolCallId, params: WaitBackgroundBashParams, signal, _onUpdate, ctx) {
-			const cwd = ctx.cwd;
-			const target = createStatusTarget(ctx, cwd);
-			const result = await manager.wait(cwd, params.id, params.timeout, signal);
-			await updateStatus(target);
-			return {
-				content: [{ type: "text", text: formatWaitResult(result.job, result.timedOut) }],
-				details: { job: result.job, timedOut: result.timedOut },
-			};
-		},
-	});
-
-	pi.registerTool({
-		name: "stop_background_bash",
-		label: "Stop Background Bash",
-		description: "Stop a running background bash job by id and mark it as killed in the project registry.",
-		promptSnippet: "Stop a running background bash job by id",
-		parameters: StopBackgroundBashParams,
-		async execute(_toolCallId, params: StopBackgroundBashParams, _signal, _onUpdate, ctx) {
-			const cwd = ctx.cwd;
-			const target = createStatusTarget(ctx, cwd);
-			const job = await manager.stop(cwd, params.id, params.signal ?? "SIGTERM");
-			await updateStatus(target);
-			return {
-				content: [{ type: "text", text: `Background bash stop result.\n\n${formatJobDetails(job)}` }],
-				details: { job },
-			};
-		},
-	});
-
-	pi.registerCommand("jobs", {
-		description: "View background bash jobs and logs",
-		handler: async (_args, ctx) => openOverlay(ctx),
-	});
-
-	pi.registerShortcut(Key.ctrlShift("j"), {
-		description: "View background bash jobs and logs",
-		handler: openOverlay,
-	});
 }

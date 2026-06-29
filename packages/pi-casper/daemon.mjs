@@ -846,7 +846,17 @@ async function ensureSessionChannel(session) {
 async function ensureSessionChannelInner(session) {
 	let mapping = state.sessions[session.sessionId];
 	if (mapping?.channelId) {
-		await repairMappedChannel(mapping).catch((error) => log(`channel repair skipped: ${errorMessage(error)}`));
+		const repaired = await repairMappedChannel(mapping).catch((error) => {
+			log(`channel repair failed: ${errorMessage(error)}`);
+			return false;
+		});
+		if (!repaired) {
+			mapping.state = "archived";
+			mapping.archivedAt ||= now();
+			mapping.updatedAt = now();
+			await writeState();
+			return undefined;
+		}
 		const topicChanged = mapping.cwd !== session.cwd || mapping.sessionFile !== session.sessionFile;
 		const nameChanged = mapping.sessionName !== session.sessionName;
 		mapping.cwd = session.cwd;
@@ -892,18 +902,13 @@ async function ensureSessionChannelInner(session) {
 }
 
 async function repairMappedChannel(mapping) {
-	const info = await getChannelInfo(mapping.channelId).catch(() => undefined);
-	if (!info || !info.is_archived) return;
-	if (!info.is_member) {
-		await log(`mapped channel is archived and bot is not a member; leaving mapping unchanged channel=${mapping.channelId}`);
-		return;
-	}
-	try {
-		await callSlack("conversations.unarchive", { channel: mapping.channelId });
-		channelInfoCache.delete(mapping.channelId);
-	} catch (error) {
-		await log(`channel unarchive failed: ${errorMessage(error)}`);
-	}
+	const info = await getChannelInfo(mapping.channelId);
+	if (!info || !info.is_archived) return true;
+	joinedChannels.delete(mapping.channelId);
+	invitedChannels.delete(mapping.channelId);
+	await callSlack("conversations.unarchive", { channel: mapping.channelId });
+	channelInfoCache.delete(mapping.channelId);
+	return true;
 }
 
 async function getChannelInfo(channelId) {
