@@ -1,0 +1,391 @@
+import { Type } from "typebox";
+import type { CbmClient } from "../cbm/client.js";
+import type { OutputService } from "../domain/output.js";
+import type { ProjectService, ToolExecutionContext } from "../domain/project.js";
+import type { QueryService } from "../domain/query.js";
+import type { SymbolService } from "../domain/symbols.js";
+import type { TraceService } from "../domain/trace.js";
+import type { CbmAugmentService } from "../extension/augment.js";
+import type { CbmRuntimeSettings } from "../extension/runtime-settings.js";
+import type { CbmStatsService } from "../extension/stats.js";
+import type { ToolTextResult } from "../cbm/result.js";
+import { renderCall, renderResult } from "./render.js";
+import {
+  DIRECTION,
+  EXPLORATION_OUTPUT_CONTROL_PARAMS,
+  MAX_CONCURRENCY,
+  METADATA_CONTROL_PARAMS,
+  OPTIONAL_PROJECT,
+  OUTPUT_CONTROL_PARAMS,
+  SEARCH_CODE_MODE,
+  SYMBOL_LABEL,
+  SYMBOL_NEIGHBORS,
+  SYMBOL_REQUEST,
+  TIMEOUT_MS,
+  TRACE_MODE,
+} from "./schemas.js";
+
+export type CbmServices = {
+  cbm: CbmClient;
+  projects: ProjectService;
+  output: OutputService;
+  symbols: SymbolService;
+  trace: TraceService;
+  query: QueryService;
+  settings: CbmRuntimeSettings;
+  stats: CbmStatsService;
+  augment: CbmAugmentService;
+};
+
+export type ToolDefinition = {
+  name: string;
+  label: string;
+  description: string;
+  promptSnippet: string;
+  promptGuidelines: string[];
+  parameters: unknown;
+  execute(params: Record<string, unknown>, services: CbmServices, ctx: ToolExecutionContext): Promise<ToolTextResult>;
+  renderCall?: (args: Record<string, unknown>, theme: any) => unknown;
+  renderResult?: (result: { details?: Record<string, unknown> }, options: unknown, theme: any) => unknown;
+};
+
+export const toolDefinitions: ToolDefinition[] = [
+  {
+    name: "search_graph",
+    label: "CBM Search Graph",
+    description: "Search the code graph for symbols and implementation locations: functions, methods, classes, routes, controllers, services, and related concepts.",
+    promptSnippet: "search_graph(query/name_pattern/semantic_query, project?): structural and semantic code graph search",
+    promptGuidelines: [
+      "Use search_graph first for symbol/workflow/route/class/function discovery and 'where is X implemented/handled/performed?' questions.",
+      "Use a small limit, usually 5-12, for targeted location lookup.",
+      "Use search_graph before read_symbol/get_code_snippet to discover likely target symbols for conceptual queries.",
+      "Do not use search_graph for exact literal strings, manifests, README/config inspection, or reading known files; use search_code or file reads instead.",
+      "Results are compact and location-first by default to save context; set include_metadata=true only when raw graph metrics/fingerprints are needed.",
+      "If returned code/source context is compacted, retry with a higher max_symbol_lines or full_output=true before falling back to read/grep.",
+      "Prefer query/name_pattern/file_pattern search first; semantic_query can be noisy, especially on small repos.",
+      "For semantic_query, pass an array of keyword strings, not one sentence string.",
+    ],
+    parameters: Type.Object({
+      project: OPTIONAL_PROJECT,
+      query: Type.Optional(Type.String({ description: "Natural-language or keyword BM25 graph search." })),
+      label: Type.Optional(Type.String()),
+      name_pattern: Type.Optional(Type.String({ description: "Regex name pattern, e.g. .*Handler.*" })),
+      qn_pattern: Type.Optional(Type.String()),
+      file_pattern: Type.Optional(Type.String()),
+      relationship: Type.Optional(Type.String()),
+      min_degree: Type.Optional(Type.Number()),
+      max_degree: Type.Optional(Type.Number()),
+      exclude_entry_points: Type.Optional(Type.Boolean()),
+      include_connected: Type.Optional(Type.Boolean()),
+      semantic_query: Type.Optional(Type.Array(Type.String())),
+      limit: Type.Optional(Type.Number({ default: 25 })),
+      offset: Type.Optional(Type.Number({ default: 0 })),
+      ...EXPLORATION_OUTPUT_CONTROL_PARAMS,
+      timeout_ms: TIMEOUT_MS,
+    }),
+    execute: (params, services, ctx) => services.query.executeQueryTool("Graph search results", "search_graph", { limit: 25, ...params }, ctx),
+    renderCall: renderCall("search_graph", (args) => String(args.query ?? args.name_pattern ?? args.semantic_query ?? "")),
+    renderResult: renderResult("search_graph"),
+  },
+  {
+    name: "resolve_symbol",
+    label: "CBM Resolve Symbol",
+    description: "Resolve a symbol name to compact candidate identities without returning source.",
+    promptSnippet: "resolve_symbol(name, file_path?/parent_class?/label?): resolve symbol candidates without source",
+    promptGuidelines: [
+      "Use resolve_symbol when you know a symbol name but need the exact qualified_name or need to disambiguate candidates.",
+      "Add file_path, parent_class, label, route_path, or route_method to narrow ambiguous names.",
+      "resolve_symbol does not return source; use read_symbol when you want source only if the match is unambiguous.",
+      "Results are compact by default; set include_metadata=true only when raw candidate metadata is needed.",
+    ],
+    parameters: Type.Object({
+      name: Type.String({ description: "Symbol name or qualified-name suffix to resolve." }),
+      project: OPTIONAL_PROJECT,
+      qualified_name: Type.Optional(Type.String({ description: "Exact or suffix qualified_name disambiguator." })),
+      file_path: Type.Optional(Type.String({ description: "File path substring or suffix disambiguator." })),
+      parent_class: Type.Optional(Type.String({ description: "Parent class name disambiguator for methods/classes." })),
+      label: Type.Optional(SYMBOL_LABEL),
+      route_path: Type.Optional(Type.String({ description: "Route path disambiguator, when indexed." })),
+      route_method: Type.Optional(Type.String({ description: "Route HTTP method disambiguator, when indexed." })),
+      limit: Type.Optional(Type.Number({ default: 20 })),
+      ...METADATA_CONTROL_PARAMS,
+      timeout_ms: TIMEOUT_MS,
+    }),
+    execute: (params, services, ctx) => services.symbols.resolve(params, ctx),
+    renderCall: renderCall("resolve_symbol", (args) => String(args.name ?? args.qualified_name ?? "")),
+    renderResult: renderResult("resolve_symbol"),
+  },
+  {
+    name: "read_symbol",
+    label: "CBM Read Symbol",
+    description: "Resolve a symbol name and read its source only when the match is unambiguous.",
+    promptSnippet: "read_symbol(name, file_path?/parent_class?/label?): read source only if symbol resolution is unambiguous",
+    promptGuidelines: [
+      "Use read_symbol when you know a symbol name plus enough disambiguators, such as file_path, parent_class, label, route_path, or route_method.",
+      "read_symbol fails closed on ambiguity; if it returns candidates, retry with more disambiguators or use get_code_snippet with an exact qualified_name.",
+      "Prefer read_symbol/get_code_snippet over raw file reads when the target is a symbol; prefer file reads for known files, configs, docs, manifests, or non-symbol content.",
+      "Use neighbors='callers'/'callees'/'both' only when direct surrounding call context is useful; neighbors are direct-only, compact, source-free, and limited by neighbor_limit.",
+      "Use trace_path instead of read_symbol neighbors for multi-hop workflow, dependency, impact, data-flow, or cross-service tracing.",
+      "read_symbol has the same source-output controls as get_code_snippet: increase max_symbol_lines or set full_output=true if source is compacted.",
+    ],
+    parameters: Type.Object({
+      name: Type.String({ description: "Symbol name or qualified-name suffix to resolve and read." }),
+      project: OPTIONAL_PROJECT,
+      qualified_name: Type.Optional(Type.String({ description: "Exact or suffix qualified_name disambiguator." })),
+      file_path: Type.Optional(Type.String({ description: "File path substring or suffix disambiguator." })),
+      parent_class: Type.Optional(Type.String({ description: "Parent class name disambiguator for methods/classes." })),
+      label: Type.Optional(SYMBOL_LABEL),
+      route_path: Type.Optional(Type.String({ description: "Route path disambiguator, when indexed." })),
+      route_method: Type.Optional(Type.String({ description: "Route HTTP method disambiguator, when indexed." })),
+      neighbors: Type.Optional(SYMBOL_NEIGHBORS),
+      neighbor_limit: Type.Optional(Type.Number({ default: 10, description: "Maximum direct callers/callees to return per side when neighbors is enabled. Default 10." })),
+      include_neighbors: Type.Optional(Type.Boolean({ description: "Compatibility alias for neighbors='both'." })),
+      limit: Type.Optional(Type.Number({ default: 20 })),
+      ...EXPLORATION_OUTPUT_CONTROL_PARAMS,
+      timeout_ms: TIMEOUT_MS,
+    }),
+    execute: (params, services, ctx) => services.symbols.read(params, ctx),
+    renderCall: renderCall("read_symbol", (args) => String(args.name ?? args.qualified_name ?? "")),
+    renderResult: renderResult("read_symbol"),
+  },
+  {
+    name: "get_code_snippet",
+    label: "CBM Snippet",
+    description: "Retrieve compact source for a known graph symbol by qualified_name.",
+    promptSnippet: "get_code_snippet(qualified_name, project?): read precise source for a graph symbol",
+    promptGuidelines: [
+      "Use get_code_snippet only after search_graph/search_code identifies the qualified_name; it is a retrieval tool, not a search tool.",
+      "Prefer read_symbol when you know a concrete symbol name plus disambiguators but do not have the exact qualified_name.",
+      "Keep snippets targeted. Retrieve one or two likely symbols first instead of bulk-reading many symbols.",
+      "Do not use get_code_snippet for broad file inspection, docs/config/manifests, or known file paths; read the file directly when that is the actual task.",
+      "By default, get_code_snippet returns source plus minimal location/call metadata; set include_metadata=true for full metrics/raw fields.",
+      "If an oversized symbol is compacted, retry get_code_snippet with a higher max_symbol_lines or full_output=true before using read.",
+    ],
+    parameters: Type.Object({
+      qualified_name: Type.String({ description: "Full qualified_name from search_graph, or a short name if unambiguous." }),
+      project: OPTIONAL_PROJECT,
+      include_neighbors: Type.Optional(Type.Boolean()),
+      ...EXPLORATION_OUTPUT_CONTROL_PARAMS,
+      timeout_ms: TIMEOUT_MS,
+    }),
+    execute: (params, services, ctx) => services.query.executeQueryTool("Code snippet", "get_code_snippet", params, ctx),
+    renderCall: renderCall("get_code_snippet", (args) => String(args.qualified_name ?? "")),
+    renderResult: renderResult("get_code_snippet"),
+  },
+  {
+    name: "get_code_snippets",
+    label: "CBM Snippets",
+    description: "Retrieve compact source for multiple known graph symbols by qualified_name in one batch call.",
+    promptSnippet: "get_code_snippets(qualified_names, project?): batch-read precise source for known graph symbols",
+    promptGuidelines: [
+      "Use get_code_snippets after search_graph/query_graph/trace_path/search_and_read_symbols identifies several exact qualified_name values.",
+      "Prefer get_code_snippets over repeated get_code_snippet calls when you need to inspect multiple symbols.",
+      "Keep batches focused, usually 3-12 symbols; split very broad inspection into targeted batches.",
+      "Metadata is compact by default; set include_metadata=true only when raw graph fields are needed.",
+      "If oversized symbols are compacted, retry with a higher max_symbol_lines or full_output=true.",
+    ],
+    parameters: Type.Object({
+      qualified_names: Type.Array(Type.String({ description: "qualified_name values to read." })),
+      project: OPTIONAL_PROJECT,
+      include_neighbors: Type.Optional(Type.Boolean()),
+      max_concurrency: MAX_CONCURRENCY,
+      ...EXPLORATION_OUTPUT_CONTROL_PARAMS,
+      timeout_ms: TIMEOUT_MS,
+    }),
+    execute: (params, services, ctx) => services.symbols.getSnippets(params, ctx),
+    renderCall: renderCall("get_code_snippets", (args) => `${Array.isArray(args.qualified_names) ? args.qualified_names.length : 0} symbols`),
+    renderResult: renderResult("get_code_snippets"),
+  },
+  {
+    name: "read_symbols",
+    label: "CBM Read Symbols",
+    description: "Resolve and read multiple concrete symbols in one batch call; each item fails closed on ambiguity.",
+    promptSnippet: "read_symbols(symbols, project?): batch resolve/read source for concrete symbol requests",
+    promptGuidelines: [
+      "Use read_symbols when you know multiple symbol names/classes/methods and need their source.",
+      "Prefer read_symbols over repeated read_symbol calls.",
+      "Add file_path, parent_class, label, route_path, route_method, or qualified_name per symbol to avoid ambiguity.",
+      "Ambiguous items return candidates instead of guessed source; retry only those items with stronger disambiguators.",
+      "Metadata is compact by default and preserves essential file_path/start_line/end_line identity.",
+      "If oversized symbols are compacted, retry with a higher max_symbol_lines or full_output=true.",
+    ],
+    parameters: Type.Object({
+      symbols: Type.Array(SYMBOL_REQUEST),
+      project: OPTIONAL_PROJECT,
+      neighbors: Type.Optional(SYMBOL_NEIGHBORS),
+      neighbor_limit: Type.Optional(Type.Number({ default: 10 })),
+      max_concurrency: MAX_CONCURRENCY,
+      ...EXPLORATION_OUTPUT_CONTROL_PARAMS,
+      timeout_ms: TIMEOUT_MS,
+    }),
+    execute: (params, services, ctx) => services.symbols.readMany(params, ctx),
+    renderCall: renderCall("read_symbols", (args) => `${Array.isArray(args.symbols) ? args.symbols.length : 0} symbols`),
+    renderResult: renderResult("read_symbols"),
+  },
+  {
+    name: "search_and_read_symbols",
+    label: "CBM Search + Read",
+    description: "Search the code graph and immediately read source for the top matching symbols in one call.",
+    promptSnippet: "search_and_read_symbols(query/name_pattern/qn_pattern/file_pattern, read_limit?): search graph and batch-read top matches",
+    promptGuidelines: [
+      "Use search_and_read_symbols when you need to discover implementation locations and inspect likely code in one step.",
+      "Prefer this over search_graph followed by several individual get_code_snippet/read_symbol calls.",
+      "Keep read_limit small, usually 3-8; the tool is exploratory and top matches may include irrelevant symbols.",
+      "Use search_graph alone when you only need locations/candidates and not source.",
+      "Metadata is compact by default and preserves essential file_path/start_line/end_line identity.",
+      "If oversized symbols are compacted, retry with a higher max_symbol_lines or full_output=true.",
+    ],
+    parameters: Type.Object({
+      project: OPTIONAL_PROJECT,
+      query: Type.Optional(Type.String({ description: "Natural-language or keyword BM25 graph search." })),
+      label: Type.Optional(Type.String()),
+      name_pattern: Type.Optional(Type.String({ description: "Regex name pattern, e.g. .*Handler.*" })),
+      qn_pattern: Type.Optional(Type.String()),
+      file_pattern: Type.Optional(Type.String()),
+      semantic_query: Type.Optional(Type.Array(Type.String())),
+      search_limit: Type.Optional(Type.Number({ default: 12 })),
+      read_limit: Type.Optional(Type.Number({ default: 8 })),
+      include_neighbors: Type.Optional(Type.Boolean()),
+      max_concurrency: MAX_CONCURRENCY,
+      ...EXPLORATION_OUTPUT_CONTROL_PARAMS,
+      timeout_ms: TIMEOUT_MS,
+    }),
+    execute: (params, services, ctx) => services.symbols.searchAndRead(params, ctx),
+    renderCall: renderCall("search_and_read_symbols", (args) => String(args.query ?? args.name_pattern ?? args.qn_pattern ?? args.file_pattern ?? "")),
+    renderResult: renderResult("search_and_read_symbols"),
+  },
+  {
+    name: "trace_path",
+    label: "CBM Trace",
+    description: "Trace callers, callees, data flow, or cross-service paths from a known anchor function/method.",
+    promptSnippet: "trace_path(function_name, direction?, mode?): trace callers, callees, data-flow, or cross-service paths",
+    promptGuidelines: [
+      "Use trace_path for caller/callee questions, dependency tracing, workflow tracing, data-flow tracing, and impact analysis instead of repeated grep.",
+      "Use trace_path after selecting an anchor symbol with search_graph unless the exact function_name is already known.",
+      "Keep depth shallow by default, usually 2-3; deeper traces can be noisy and context-heavy.",
+      "Short names are auto-resolved when unambiguous; if multiple candidates are returned, retry with an exact qualified_name.",
+      "Trace output may include local helper functions; use exclude_paths or a more specific anchor if they are not relevant.",
+      "Trace output is compact by default; set include_metadata=true only when raw trace/graph metadata is needed.",
+      "If returned code/source context is compacted, retry with a higher max_symbol_lines or full_output=true before falling back to read/grep.",
+      "risk_labels are heuristic and can be noisy; request them only for explicit risk/impact analysis.",
+    ],
+    parameters: Type.Object({
+      function_name: Type.String(),
+      project: OPTIONAL_PROJECT,
+      direction: Type.Optional(DIRECTION),
+      depth: Type.Optional(Type.Number({ default: 3 })),
+      mode: Type.Optional(TRACE_MODE),
+      parameter_name: Type.Optional(Type.String()),
+      edge_types: Type.Optional(Type.Array(Type.String())),
+      risk_labels: Type.Optional(Type.Boolean({ description: "Heuristic risk labels. Default false; can be noisy." })),
+      include_tests: Type.Optional(Type.Boolean()),
+      exclude_paths: Type.Optional(Type.Array(Type.String({ description: "Plugin-side substring filters for file paths or qualified names in trace results." }))),
+      ...EXPLORATION_OUTPUT_CONTROL_PARAMS,
+      timeout_ms: TIMEOUT_MS,
+    }),
+    execute: (params, services, ctx) => services.trace.trace(params, ctx),
+    renderCall: renderCall("trace_path", (args) => `${String(args.function_name ?? "")} ${String(args.direction ?? "both")}`),
+    renderResult: renderResult("trace_path"),
+  },
+  {
+    name: "get_architecture",
+    label: "CBM Architecture",
+    description: "Get a compact high-level architecture overview: hotspots, routes/entry points, packages, dependencies, and layers when available.",
+    promptSnippet: "get_architecture(project?, aspects?): high-level codebase architecture overview",
+    promptGuidelines: [
+      "Use get_architecture early when orienting yourself in an indexed codebase.",
+      "Do not use get_architecture for targeted 'where is X implemented?' lookup; use search_graph instead.",
+      "Architecture output is compact by default and prioritizes entry points, hotspots, boundaries, layers, routes, packages, and dependencies; set include_metadata=true for the full upstream overview.",
+      "Requested aspects may be absent when the index has no data for them; use search_graph or query_graph for targeted route/entry-point lookup.",
+      "For large repos, prefer targeted aspects such as entry_points, hotspots, dependencies, or layers instead of requesting everything.",
+      "If returned code/source context is compacted, retry with a higher max_symbol_lines or full_output=true before falling back to read/grep.",
+    ],
+    parameters: Type.Object({ project: OPTIONAL_PROJECT, aspects: Type.Optional(Type.Array(Type.String())), ...EXPLORATION_OUTPUT_CONTROL_PARAMS, timeout_ms: TIMEOUT_MS }),
+    execute: (params, services, ctx) => services.query.executeQueryTool("Architecture overview", "get_architecture", params, ctx),
+    renderCall: renderCall("get_architecture"),
+    renderResult: renderResult("get_architecture"),
+  },
+  {
+    name: "get_graph_schema",
+    label: "CBM Schema",
+    description: "Inspect available graph labels, edge types, and properties.",
+    promptSnippet: "get_graph_schema(project?): inspect available graph labels, edge types, and properties",
+    promptGuidelines: [
+      "Use get_graph_schema before writing non-trivial query_graph Cypher.",
+      "Use sparingly; it is schema metadata and may be verbose. Do not use it for normal symbol lookup.",
+    ],
+    parameters: Type.Object({ project: OPTIONAL_PROJECT, timeout_ms: TIMEOUT_MS }),
+    execute: (params, services, ctx) => services.query.executeQueryTool("Graph schema", "get_graph_schema", params, ctx),
+    renderCall: renderCall("get_graph_schema"),
+    renderResult: renderResult("get_graph_schema"),
+  },
+  {
+    name: "query_graph",
+    label: "CBM Query Graph",
+    description: "Run read-only Cypher-like graph queries for custom structural questions, aggregations, and multi-hop relationships.",
+    promptSnippet: "query_graph(query, project?): run read-only Cypher over the code graph",
+    promptGuidelines: [
+      "Use query_graph for complex multi-hop graph questions after checking get_graph_schema. Prefer search_graph for simple symbol discovery.",
+      "Keep returned columns narrow and limit row counts to control context.",
+      "codebase-memory query_graph supports a Cypher-like subset, not necessarily full Neo4j Cypher; prefer simple MATCH patterns.",
+      "If returned code/source cells are compacted, retry with a higher max_symbol_lines or full_output=true before falling back to read/grep.",
+      "Treat numeric sorting/ranking queries cautiously: the plugin normalizes common numeric result values for display, but upstream query ordering may still be unreliable.",
+    ],
+    parameters: Type.Object({ query: Type.String(), project: OPTIONAL_PROJECT, max_rows: Type.Optional(Type.Number({ default: 200 })), ...OUTPUT_CONTROL_PARAMS, timeout_ms: TIMEOUT_MS }),
+    execute: (params, services, ctx) => services.query.queryGraph(params, ctx),
+    renderCall: renderCall("query_graph", (args) => String(args.query ?? "").slice(0, 80)),
+    renderResult: renderResult("query_graph"),
+  },
+  {
+    name: "search_code",
+    label: "CBM Search Code",
+    description: "Literal text/regex search over indexed files, enriched with symbol-grouped context.",
+    promptSnippet: "search_code(pattern, project?): grep-like search enriched with graph context",
+    promptGuidelines: [
+      "Use search_code for exact literal text/regex search in indexed files: env vars, config keys, route strings, error messages, constants, template text, comments, and docstrings.",
+      "If the query is a symbol name, prefer resolve_symbol/read_symbol; use search_code when you need all textual occurrences or exact non-symbol text.",
+      "Prefer search_graph for conceptual/symbol discovery and trace_path for call relationships.",
+      "search_code returns compact symbol-grouped matches by default; set include_metadata=true only when raw enrichment metadata is needed.",
+      "Oversized per-symbol contexts are compacted by default; retry search_code with a higher max_symbol_lines or full_output=true before falling back to read/grep.",
+    ],
+    parameters: Type.Object({
+      pattern: Type.String(),
+      project: OPTIONAL_PROJECT,
+      file_pattern: Type.Optional(Type.String()),
+      path_filter: Type.Optional(Type.String()),
+      mode: Type.Optional(SEARCH_CODE_MODE),
+      context: Type.Optional(Type.Number()),
+      regex: Type.Optional(Type.Boolean()),
+      limit: Type.Optional(Type.Number({ default: 10 })),
+      ...EXPLORATION_OUTPUT_CONTROL_PARAMS,
+      timeout_ms: TIMEOUT_MS,
+    }),
+    execute: (params, services, ctx) => services.query.executeQueryTool("Code search results", "search_code", { mode: "compact", context: 2, limit: 10, ...params }, ctx),
+    renderCall: renderCall("search_code", (args) => String(args.pattern ?? "")),
+    renderResult: renderResult("search_code"),
+  },
+  {
+    name: "detect_changes",
+    label: "CBM Detect Changes",
+    description: "Analyze local git changes and map them to affected symbols/callers.",
+    promptSnippet: "detect_changes(project?, depth?, base_branch?/since?): graph impact analysis for local changes",
+    promptGuidelines: [
+      "Use detect_changes when reviewing local diffs or estimating blast radius before editing or committing.",
+      "Do not use detect_changes for ordinary lookup tasks or when there are no relevant local changes.",
+      "Change impact output is compact by default; set include_metadata=true for full raw impact metadata.",
+      "If returned code/source context is compacted, retry with a higher max_symbol_lines or full_output=true before falling back to read/grep.",
+    ],
+    parameters: Type.Object({
+      project: OPTIONAL_PROJECT,
+      scope: Type.Optional(Type.String()),
+      depth: Type.Optional(Type.Number({ default: 2 })),
+      base_branch: Type.Optional(Type.String()),
+      since: Type.Optional(Type.String()),
+      ...EXPLORATION_OUTPUT_CONTROL_PARAMS,
+      timeout_ms: TIMEOUT_MS,
+    }),
+    execute: (params, services, ctx) => services.query.executeQueryTool("Change impact results", "detect_changes", params, ctx),
+    renderCall: renderCall("detect_changes"),
+    renderResult: renderResult("detect_changes"),
+  },
+];

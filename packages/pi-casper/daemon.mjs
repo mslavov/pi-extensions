@@ -846,10 +846,18 @@ async function ensureSessionChannel(session) {
 async function ensureSessionChannelInner(session) {
 	let mapping = state.sessions[session.sessionId];
 	if (mapping?.channelId) {
-		const repaired = await repairMappedChannel(mapping).catch((error) => {
-			log(`channel repair failed: ${errorMessage(error)}`);
+		const repaired = await repairMappedChannel(mapping).catch(async (error) => {
+			const message = errorMessage(error);
+			await log(`channel repair failed: ${message}`);
+			if (isInaccessibleChannelError(message)) {
+				delete state.channels[mapping.channelId];
+				delete state.sessions[session.sessionId];
+				await writeState();
+				mapping = undefined;
+			}
 			return false;
 		});
+		if (!mapping) return ensureSessionChannelInner(session);
 		if (!repaired) {
 			mapping.state = "archived";
 			mapping.archivedAt ||= now();
@@ -909,6 +917,10 @@ async function repairMappedChannel(mapping) {
 	await callSlack("conversations.unarchive", { channel: mapping.channelId });
 	channelInfoCache.delete(mapping.channelId);
 	return true;
+}
+
+function isInaccessibleChannelError(message) {
+	return /\bnot_in_channel\b|\bchannel_not_found\b|\bnot_found\b/.test(message);
 }
 
 async function getChannelInfo(channelId) {

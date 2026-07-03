@@ -1,0 +1,25 @@
+{
+  "name": "pi-cbm-proxy",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Compact Pi wrapper for codebase-memory-mcp with auto-indexing, one proxy tool, and selected symbol helpers.",
+  "keywords": ["pi-package", "pi-extension", "codebase-memory", "code-intelligence"],
+  "license": "MIT",
+  "pi": {
+    "extensions": ["./src/index.ts"]
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "build": "echo 'pi compiles TS directly'",
+    "clean": "echo 'nothing to clean'"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.2"
+  }
+}

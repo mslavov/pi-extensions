@@ -604,13 +604,12 @@ export default function (pi: ExtensionAPI) {
 	function updateStatus(ctx: ExtensionContext, error?: string): void {
 		try {
 			if (error) {
-				ctx.ui.setStatus("casper", `casper: ${error}`);
+				ctx.ui.setStatus("casper", "casper: err");
 				return;
 			}
-			if (broker.connected && broker.channelName) ctx.ui.setStatus("casper", `#${broker.channelName}`);
-			else if (broker.connected) ctx.ui.setStatus("casper", "casper: connected");
-			else if (brokerConnecting) ctx.ui.setStatus("casper", "casper: connecting");
-			else ctx.ui.setStatus("casper", undefined);
+			if (broker.connected) ctx.ui.setStatus("casper", "casper: on");
+			else if (brokerConnecting) ctx.ui.setStatus("casper", "casper: conn");
+			else ctx.ui.setStatus("casper", "casper: off");
 		} catch (caught) {
 			if (isStaleContextError(caught)) return;
 			throw caught;

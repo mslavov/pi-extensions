@@ -42,14 +42,18 @@ interface UsageTotals {
 }
 
 const ANSI_PATTERN = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
+const EXTENSION_STATUS_COLOR_KEYS: ThemeColorKey[] = ["extensionStatus1", "extensionStatus2", "extensionStatus3", "extensionStatus4"];
 
 export function renderSegments(line: DisplayLineConfig, context: SegmentRenderContext): RenderedSegment[] {
 	const segments: RenderedSegment[] = [];
 
 	for (const [name, config] of Object.entries(line.segments) as [SegmentName, SegmentConfig][]) {
 		if (!config?.enabled) continue;
-		const segment = renderSegment(name, config, context);
-		if (segment && segment.text.trim()) segments.push({ ...segment, align: config.align ?? "left" });
+		const rendered = renderSegment(name, config, context);
+		const renderedSegments = Array.isArray(rendered) ? rendered : rendered ? [rendered] : [];
+		for (const segment of renderedSegments) {
+			if (segment.text.trim()) segments.push({ ...segment, align: config.align ?? "left" });
+		}
 	}
 
 	return segments;
@@ -76,7 +80,7 @@ function renderSegment(
 	name: SegmentName,
 	config: SegmentConfig,
 	context: SegmentRenderContext,
-): RenderedSegment | undefined {
+): RenderedSegment | RenderedSegment[] | undefined {
 	switch (name) {
 		case "directory":
 			return renderDirectory(config, context);
@@ -266,12 +270,14 @@ function renderTmux(config: SegmentConfig): RenderedSegment | undefined {
 	return { name: "tmux", colorKey: "tmux", text: sanitizePlainText(config.label ?? "tmux") };
 }
 
-function renderStatus(_config: SegmentConfig, context: SegmentRenderContext): RenderedSegment | undefined {
+function renderStatus(_config: SegmentConfig, context: SegmentRenderContext): RenderedSegment[] | undefined {
 	const statuses = Array.from(context.footerData.getExtensionStatuses().entries())
 		.sort(([a], [b]) => a.localeCompare(b))
 		.map(([, text]) => sanitizePlainText(text))
 		.filter(Boolean);
-	return statuses.length > 0 ? { name: "status", colorKey: "status", text: statuses.join(" ") } : undefined;
+	return statuses.length > 0
+		? statuses.map((text, index) => ({ name: "status", colorKey: EXTENSION_STATUS_COLOR_KEYS[index % EXTENSION_STATUS_COLOR_KEYS.length], text }))
+		: undefined;
 }
 
 function getSubscriptionProviderLabel(provider: SubscriptionProviderName): string {

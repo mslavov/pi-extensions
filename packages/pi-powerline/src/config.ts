@@ -24,7 +24,7 @@ export type SegmentName =
 	| "tmux"
 	| "status";
 export type UnsupportedSegmentName = "today" | "block" | "weekly";
-export type ThemeColorKey = SegmentName | "warning" | "critical" | "muted";
+export type ThemeColorKey = SegmentName | "warning" | "critical" | "muted" | "extensionStatus1" | "extensionStatus2" | "extensionStatus3" | "extensionStatus4";
 
 export interface SegmentConfig {
 	enabled: boolean;
@@ -130,6 +130,10 @@ const THEME_COLOR_KEYS = new Set<ThemeColorKey>([
 	"warning",
 	"critical",
 	"muted",
+	"extensionStatus1",
+	"extensionStatus2",
+	"extensionStatus3",
+	"extensionStatus4",
 ]);
 
 export const DEFAULT_CONFIG: PowerlineConfig = {

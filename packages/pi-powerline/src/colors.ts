@@ -26,6 +26,10 @@ const THEME_KEYS: ThemeColorKey[] = [
 	"warning",
 	"critical",
 	"muted",
+	"extensionStatus1",
+	"extensionStatus2",
+	"extensionStatus3",
+	"extensionStatus4",
 ];
 
 const THEMES: Record<string, ThemePalette> = {
@@ -44,6 +48,10 @@ const THEMES: Record<string, ThemePalette> = {
 		warning: ["#111827", "#fbbf24"],
 		critical: ["#ffffff", "#dc2626"],
 		muted: ["#cbd5e1", "#1f2937"],
+		extensionStatus1: ["#cbd5e1", "#1f2937"],
+		extensionStatus2: ["#bfdbfe", "#1e3a5f"],
+		extensionStatus3: ["#ddd6fe", "#3b2f5f"],
+		extensionStatus4: ["#99f6e4", "#134e4a"],
 	}),
 	light: makeTheme({
 		directory: ["#ffffff", "#1d4ed8"],
@@ -60,6 +68,10 @@ const THEMES: Record<string, ThemePalette> = {
 		warning: ["#451a03", "#fde68a"],
 		critical: ["#ffffff", "#ef4444"],
 		muted: ["#374151", "#e5e7eb"],
+		extensionStatus1: ["#374151", "#e5e7eb"],
+		extensionStatus2: ["#1e3a8a", "#dbeafe"],
+		extensionStatus3: ["#581c87", "#ede9fe"],
+		extensionStatus4: ["#134e4a", "#ccfbf1"],
 	}),
 	nord: makeTheme({
 		directory: ["#eceff4", "#5e81ac"],
@@ -76,6 +88,10 @@ const THEMES: Record<string, ThemePalette> = {
 		warning: ["#2e3440", "#ebcb8b"],
 		critical: ["#eceff4", "#bf616a"],
 		muted: ["#d8dee9", "#3b4252"],
+		extensionStatus1: ["#d8dee9", "#3b4252"],
+		extensionStatus2: ["#d8dee9", "#434c5e"],
+		extensionStatus3: ["#2e3440", "#8fbcbb"],
+		extensionStatus4: ["#2e3440", "#81a1c1"],
 	}),
 	"tokyo-night": makeTheme({
 		directory: ["#c0caf5", "#2f7dc8"],
@@ -92,6 +108,10 @@ const THEMES: Record<string, ThemePalette> = {
 		warning: ["#1a1b26", "#e0af68"],
 		critical: ["#c0caf5", "#f7768e"],
 		muted: ["#a9b1d6", "#1f2335"],
+		extensionStatus1: ["#a9b1d6", "#1f2335"],
+		extensionStatus2: ["#c0caf5", "#24283b"],
+		extensionStatus3: ["#1a1b26", "#7aa2f7"],
+		extensionStatus4: ["#1a1b26", "#73daca"],
 	}),
 	"rose-pine": makeTheme({
 		directory: ["#e0def4", "#31748f"],
@@ -108,6 +128,10 @@ const THEMES: Record<string, ThemePalette> = {
 		warning: ["#191724", "#f6c177"],
 		critical: ["#e0def4", "#eb6f92"],
 		muted: ["#908caa", "#21202e"],
+		extensionStatus1: ["#908caa", "#21202e"],
+		extensionStatus2: ["#e0def4", "#26233a"],
+		extensionStatus3: ["#191724", "#9ccfd8"],
+		extensionStatus4: ["#191724", "#c4a7e7"],
 	}),
 	gruvbox: makeTheme({
 		directory: ["#fbf1c7", "#458588"],
@@ -124,6 +148,10 @@ const THEMES: Record<string, ThemePalette> = {
 		warning: ["#282828", "#fabd2f"],
 		critical: ["#fbf1c7", "#cc241d"],
 		muted: ["#d5c4a1", "#3c3836"],
+		extensionStatus1: ["#d5c4a1", "#3c3836"],
+		extensionStatus2: ["#ebdbb2", "#504945"],
+		extensionStatus3: ["#282828", "#83a598"],
+		extensionStatus4: ["#282828", "#8ec07c"],
 	}),
 };
 

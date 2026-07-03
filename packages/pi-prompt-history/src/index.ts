@@ -1,21 +1,23 @@
 import {
-	SessionManager,
 	migrateSessionEntries,
 	parseSessionEntries,
 	type ExtensionAPI,
 	type ExtensionContext,
 	type FileEntry,
 	type SessionEntry,
-	type SessionInfo,
 	type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { CURSOR_MARKER, Key, fuzzyFilter, matchesKey, truncateToWidth, type Component, type Focusable } from "@earendil-works/pi-tui";
-import { readFile } from "node:fs/promises";
-import { basename, resolve } from "node:path";
+import { readdir, readFile } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 
 const SHORTCUT = Key.ctrl("r");
+const COMMAND_SHORTCUT = Key.super("r");
 const SCOPE_SHORTCUT = Key.ctrl("s");
 const MAX_VISIBLE = 12;
+const MAX_RESULTS = 50;
+const SEARCH_BATCH_SIZE = 8;
+const SEARCH_DEBOUNCE_MS = 120;
 
 type Scope = "all" | "project" | "session";
 
@@ -28,13 +30,30 @@ interface PromptHistoryItem {
 	timestamp: number;
 }
 
-type ItemsByScope = Record<Scope, PromptHistoryItem[]>;
+interface HistorySource {
+	sessionDir: string;
+	getCurrentItems: () => PromptHistoryItem[];
+}
+
+interface PromptSessionRef {
+	path: string;
+	cwd: string;
+	modified: Date;
+}
+
+interface SearchState {
+	items: PromptHistoryItem[];
+	loading: boolean;
+	scanned: number;
+	total?: number;
+	complete: boolean;
+}
 
 interface PromptHistoryResult {
 	text: string;
 }
 
-const SCOPES: Scope[] = ["all", "project", "session"];
+const SCOPES: Scope[] = ["session", "project", "all"];
 const SCOPE_LABELS: Record<Scope, string> = {
 	all: "All projects",
 	project: "Current project",
@@ -44,64 +63,54 @@ const SCOPE_LABELS: Record<Scope, string> = {
 export default function piPromptHistory(pi: ExtensionAPI): void {
 	pi.registerShortcut(SHORTCUT, {
 		description: "Search prompt history",
-		handler: async (ctx) => {
-			const itemsByScope = await loadHistory(ctx);
-			if (itemsByScope.all.length === 0) {
-				ctx.ui.notify("No prompt history found", "info");
-				return;
-			}
-
-			const result = await ctx.ui.custom<PromptHistoryResult | undefined>(
-				(tui, theme, _keybindings, done) => new PromptHistoryPicker(itemsByScope, theme, () => tui.requestRender(), done),
-				{
-					overlay: true,
-					overlayOptions: {
-						width: "80%",
-						minWidth: 64,
-						maxHeight: "90%",
-						margin: 2,
-					},
-				},
-			);
-
-			if (result) {
-				ctx.ui.setEditorText(result.text);
-			}
-		},
+		handler: openPromptHistory,
+	});
+	pi.registerShortcut(COMMAND_SHORTCUT, {
+		description: "Search prompt history",
+		handler: openPromptHistory,
 	});
 }
 
-async function loadHistory(ctx: ExtensionContext): Promise<ItemsByScope> {
-	const currentItems = collectCurrentSessionPrompts(ctx);
-	const [allSessions, projectSessions] = await Promise.all([
-		SessionManager.listAll(),
-		SessionManager.list(ctx.cwd, ctx.sessionManager.getSessionDir()),
-	]);
+async function openPromptHistory(ctx: ExtensionContext): Promise<void> {
+	const source = createHistorySource(ctx);
 
-	const [allFileItems, projectFileItems] = await Promise.all([loadSessionPrompts(allSessions), loadSessionPrompts(projectSessions)]);
+	const result = await ctx.ui.custom<PromptHistoryResult | undefined>(
+		(tui, theme, _keybindings, done) => new PromptHistoryPicker(source, theme, () => tui.requestRender(), done),
+		{
+			overlay: true,
+			overlayOptions: {
+				width: "80%",
+				minWidth: 64,
+				maxHeight: "90%",
+				margin: 2,
+			},
+		},
+	);
 
+	if (result) {
+		ctx.ui.setEditorText(result.text);
+	}
+}
+
+function createHistorySource(ctx: ExtensionContext): HistorySource {
+	const sessionManager = ctx.sessionManager;
+	const cwd = ctx.cwd;
 	return {
-		all: dedupeAndSort([...allFileItems, ...currentItems]),
-		project: dedupeAndSort([...projectFileItems, ...currentItems]),
-		session: dedupeAndSort(currentItems),
+		sessionDir: sessionManager.getSessionDir(),
+		getCurrentItems: () => collectCurrentSessionPrompts(cwd, sessionManager),
 	};
 }
 
-async function loadSessionPrompts(sessions: SessionInfo[]): Promise<PromptHistoryItem[]> {
-	const nested = await Promise.all(sessions.map((session) => readSessionPrompts(session)));
-	return nested.flat();
-}
-
-async function readSessionPrompts(session: SessionInfo): Promise<PromptHistoryItem[]> {
+async function readSessionPrompts(session: PromptSessionRef): Promise<PromptHistoryItem[]> {
 	try {
 		const content = await readFile(session.path, "utf8");
 		const entries = parseSessionEntries(content);
 		migrateSessionEntries(entries);
 		const sessionEntries = entries.filter(isSessionEntry);
 		return collectPrompts(sessionEntries, {
-			cwd: session.cwd,
+			cwd: sessionCwd(entries, session.cwd),
 			sessionPath: session.path,
-			sessionName: session.name,
+			sessionName: sessionName(sessionEntries),
 			timestampFallback: session.modified.getTime(),
 		});
 	} catch {
@@ -109,11 +118,11 @@ async function readSessionPrompts(session: SessionInfo): Promise<PromptHistoryIt
 	}
 }
 
-function collectCurrentSessionPrompts(ctx: ExtensionContext): PromptHistoryItem[] {
-	return collectPrompts(ctx.sessionManager.getEntries(), {
-		cwd: ctx.sessionManager.getCwd() || ctx.cwd,
-		sessionPath: ctx.sessionManager.getSessionFile(),
-		sessionName: ctx.sessionManager.getSessionName(),
+function collectCurrentSessionPrompts(cwd: string, sessionManager: ExtensionContext["sessionManager"]): PromptHistoryItem[] {
+	return collectPrompts(sessionManager.getEntries(), {
+		cwd: sessionManager.getCwd() || cwd,
+		sessionPath: sessionManager.getSessionFile(),
+		sessionName: sessionManager.getSessionName(),
 		timestampFallback: Date.now(),
 	});
 }
@@ -148,6 +157,19 @@ function isSessionEntry(entry: FileEntry): entry is SessionEntry {
 	return entry.type !== "session";
 }
 
+function sessionCwd(entries: FileEntry[], fallback: string): string {
+	const header = entries.find((entry) => entry.type === "session");
+	return header && "cwd" in header && typeof header.cwd === "string" ? header.cwd : fallback;
+}
+
+function sessionName(entries: SessionEntry[]): string | undefined {
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const entry = entries[index];
+		if (entry?.type === "session_info") return entry.name?.trim() || undefined;
+	}
+	return undefined;
+}
+
 function extractUserText(content: unknown): string {
 	if (typeof content === "string") return content;
 	if (!Array.isArray(content)) return "";
@@ -175,6 +197,79 @@ function dedupeAndSort(items: PromptHistoryItem[]): PromptHistoryItem[] {
 	return result;
 }
 
+function limitedPrompts(items: PromptHistoryItem[], query: string): PromptHistoryItem[] {
+	const sorted = dedupeAndSort(items);
+	if (!query.trim()) return sorted.slice(0, MAX_RESULTS);
+	return fuzzyFilter(sorted, query, (item) => `${item.text} ${item.cwd} ${item.sessionName ?? ""}`).slice(0, MAX_RESULTS);
+}
+
+async function listSessionsForScope(source: HistorySource, scope: Scope): Promise<PromptSessionRef[]> {
+	const sessions = scope === "all" ? await listAllSessionRefs(source.sessionDir) : await listSessionRefsInDir(source.sessionDir);
+	return sessions.sort((left, right) => right.modified.getTime() - left.modified.getTime());
+}
+
+async function listAllSessionRefs(sessionDir: string): Promise<PromptSessionRef[]> {
+	try {
+		const sessionsRoot = dirname(sessionDir);
+		const entries = await readdir(sessionsRoot, { withFileTypes: true });
+		const nested = await Promise.all(entries.filter((entry) => entry.isDirectory()).map((entry) => listSessionRefsInDir(join(sessionsRoot, entry.name))));
+		return nested.flat();
+	} catch {
+		return [];
+	}
+}
+
+async function listSessionRefsInDir(sessionDir: string): Promise<PromptSessionRef[]> {
+	try {
+		const entries = await readdir(sessionDir, { withFileTypes: true });
+		return entries
+			.filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))
+			.map((entry) => ({ path: join(sessionDir, entry.name), cwd: "", modified: sessionDateFromFileName(entry.name) }));
+	} catch {
+		return [];
+	}
+}
+
+function sessionDateFromFileName(name: string): Date {
+	const match = /^(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z)/.exec(name);
+	const timestamp = match?.[1]?.replace(/T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z$/, "T$1:$2:$3.$4Z");
+	const time = timestamp ? new Date(timestamp).getTime() : NaN;
+	return Number.isFinite(time) ? new Date(time) : new Date(0);
+}
+
+async function searchScopedHistory(
+	source: HistorySource,
+	scope: Scope,
+	query: string,
+	onProgress: (state: SearchState) => void,
+	shouldContinue: () => boolean,
+): Promise<SearchState> {
+	if (scope === "session") {
+		const state = searchState(limitedPrompts(source.getCurrentItems(), query), false, 0, undefined, true);
+		onProgress(state);
+		return state;
+	}
+
+	const sessions = await listSessionsForScope(source, scope);
+	let scanned = 0;
+	let matches: PromptHistoryItem[] = [];
+
+	for (let index = 0; index < sessions.length && shouldContinue(); index += SEARCH_BATCH_SIZE) {
+		const batch = sessions.slice(index, index + SEARCH_BATCH_SIZE);
+		const nested = await Promise.all(batch.map((session) => readSessionPrompts(session)));
+		scanned += batch.length;
+		matches = limitedPrompts([...matches, ...nested.flat()], query);
+		onProgress(searchState(matches, true, scanned, sessions.length, false));
+		if (matches.length >= MAX_RESULTS) break;
+	}
+
+	return searchState(matches, false, scanned, sessions.length, scanned >= sessions.length);
+}
+
+function searchState(items: PromptHistoryItem[], loading: boolean, scanned: number, total: number | undefined, complete: boolean): SearchState {
+	return { items, loading, scanned, total, complete };
+}
+
 function normalizeCwd(cwd: string): string {
 	return cwd ? resolve(cwd) : "";
 }
@@ -186,26 +281,39 @@ function parseTimestamp(value: string, fallback: number): number {
 
 class PromptHistoryPicker implements Component, Focusable {
 	focused = false;
-	private scope: Scope = "all";
+	private scope: Scope = "session";
 	private query = "";
 	private selectedIndex = 0;
 	private cachedWidth?: number;
 	private cachedLines?: string[];
+	private searchToken = 0;
+	private searchTimer?: ReturnType<typeof setTimeout>;
+	private closed = false;
+	private readonly states: Record<Scope, SearchState>;
 
 	constructor(
-		private readonly itemsByScope: ItemsByScope,
+		private readonly source: HistorySource,
 		private readonly theme: Theme,
 		private readonly requestRender: () => void,
 		private readonly done: (value: PromptHistoryResult | undefined) => void,
-	) {}
+	) {
+		this.states = {
+			session: searchState([], true, 0, undefined, false),
+			project: searchState([], false, 0, undefined, false),
+			all: searchState([], false, 0, undefined, false),
+		};
+		setTimeout(() => {
+			if (!this.closed && this.searchToken === 0) this.scheduleSearch(0);
+		}, 0);
+	}
 
 	handleInput(data: string): void {
 		if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
-			this.done(undefined);
+			this.finish(undefined);
 			return;
 		}
 
-		if (matchesKey(data, SCOPE_SHORTCUT)) {
+		if (matchesKey(data, SHORTCUT) || matchesKey(data, COMMAND_SHORTCUT) || matchesKey(data, SCOPE_SHORTCUT)) {
 			this.cycleScope();
 			return;
 		}
@@ -213,7 +321,7 @@ class PromptHistoryPicker implements Component, Focusable {
 		if (matchesKey(data, Key.enter) || matchesKey(data, Key.return)) {
 			const selected = this.filteredItems()[this.selectedIndex];
 			if (selected) {
-				this.done({ text: selected.text });
+				this.finish({ text: selected.text });
 			}
 			return;
 		}
@@ -241,20 +349,20 @@ class PromptHistoryPicker implements Component, Focusable {
 		if (matchesKey(data, Key.backspace)) {
 			if (this.query.length > 0) {
 				this.query = Array.from(this.query).slice(0, -1).join("");
-				this.resetSelection();
+				this.resetSelectionAndSearch();
 			}
 			return;
 		}
 
 		if (matchesKey(data, Key.delete)) {
 			this.query = "";
-			this.resetSelection();
+			this.resetSelectionAndSearch();
 			return;
 		}
 
 		if (data.length === 1 && data.charCodeAt(0) >= 32) {
 			this.query += data;
-			this.resetSelection();
+			this.resetSelectionAndSearch();
 		}
 	}
 
@@ -265,6 +373,7 @@ class PromptHistoryPicker implements Component, Focusable {
 
 		const th = this.theme;
 		const filtered = this.filteredItems();
+		const state = this.states[this.scope];
 		const lines: string[] = [];
 		const contentWidth = Math.max(20, width - 4);
 		const border = th.fg("borderMuted", "─".repeat(width));
@@ -273,17 +382,16 @@ class PromptHistoryPicker implements Component, Focusable {
 		const cursor = this.focused ? CURSOR_MARKER + th.fg("accent", "▌") : "";
 
 		lines.push(border);
-		lines.push(truncateToWidth(` ${th.fg("accent", th.bold("Prompt History"))} ${th.fg("muted", "·")} ${scopeLabel} ${th.fg("dim", `(${filtered.length}/${this.itemsByScope[this.scope].length})`)}`, width));
+		lines.push(truncateToWidth(` ${th.fg("accent", th.bold("Prompt History"))} ${th.fg("muted", "·")} ${scopeLabel} ${th.fg("dim", formatCount(state))}`, width));
 		lines.push(truncateToWidth(` ${th.fg("muted", "Search:")} ${queryText}${cursor}`, width));
 		lines.push("");
 
-		if (filtered.length === 0) {
-			lines.push(truncateToWidth(`  ${th.fg("warning", "No matching prompts")}`, width));
-		} else {
-			const start = this.visibleStart(filtered.length);
-			const visible = filtered.slice(start, start + MAX_VISIBLE);
+		const start = this.visibleStart(filtered.length);
+		const visible = filtered.slice(start, start + MAX_VISIBLE);
+		const emptyMessage = state.loading ? th.fg("muted", "Searching prompt history…") : th.fg("warning", "No matching prompts");
 
-			for (let i = 0; i < visible.length; i++) {
+		for (let i = 0; i < MAX_VISIBLE; i++) {
+			if (i < visible.length) {
 				const item = visible[i];
 				const index = start + i;
 				const selected = index === this.selectedIndex;
@@ -292,16 +400,18 @@ class PromptHistoryPicker implements Component, Focusable {
 				const promptLine = selected && !this.query.trim() ? th.bold(preview) : preview;
 				lines.push(truncateToWidth(` ${marker} ${promptLine}`, width));
 				lines.push(truncateToWidth(`   ${th.fg("dim", formatMetadata(item))}`, contentWidth));
-			}
-
-			if (filtered.length > MAX_VISIBLE) {
+			} else if (i === 0) {
+				lines.push(truncateToWidth(`   ${emptyMessage}`, width));
 				lines.push("");
-				lines.push(truncateToWidth(`  ${th.fg("dim", `Showing ${start + 1}-${Math.min(start + MAX_VISIBLE, filtered.length)} of ${filtered.length}`)}`, width));
+			} else {
+				lines.push("");
+				lines.push("");
 			}
 		}
 
+		lines.push(truncateToWidth(`  ${th.fg("dim", formatStatus(state, filtered.length, start))}`, width));
 		lines.push("");
-		lines.push(truncateToWidth(` ${th.fg("dim", "↑/↓ move · Enter select · Ctrl+S scope · Esc cancel")}`, width));
+		lines.push(truncateToWidth(` ${th.fg("dim", "↑/↓ move · Enter select · Cmd/Ctrl+R scope · Esc cancel")}`, width));
 		lines.push(border);
 
 		this.cachedWidth = width;
@@ -315,15 +425,13 @@ class PromptHistoryPicker implements Component, Focusable {
 	}
 
 	private filteredItems(): PromptHistoryItem[] {
-		const items = this.itemsByScope[this.scope];
-		if (!this.query.trim()) return items;
-		return fuzzyFilter(items, this.query, (item) => `${item.text} ${item.cwd} ${item.sessionName ?? ""}`);
+		return this.states[this.scope].items;
 	}
 
 	private cycleScope(): void {
 		const currentIndex = SCOPES.indexOf(this.scope);
 		this.scope = SCOPES[(currentIndex + 1) % SCOPES.length] ?? "all";
-		this.resetSelection();
+		this.resetSelectionAndSearch(0);
 	}
 
 	private moveSelection(delta: number): void {
@@ -334,10 +442,65 @@ class PromptHistoryPicker implements Component, Focusable {
 		this.requestRender();
 	}
 
-	private resetSelection(): void {
+	private resetSelectionAndSearch(delayMs = SEARCH_DEBOUNCE_MS): void {
 		this.selectedIndex = 0;
+		this.scheduleSearch(delayMs);
+	}
+
+	private scheduleSearch(delayMs: number): void {
 		this.invalidate();
 		this.requestRender();
+		if (this.searchTimer) clearTimeout(this.searchTimer);
+		if (this.scope === "session") {
+			this.searchToken++;
+			this.states.session = searchState([], true, 0, undefined, false);
+			this.invalidate();
+			this.requestRender();
+			void this.runSearch(this.searchToken, "session", this.query);
+			return;
+		}
+
+		const token = ++this.searchToken;
+		const scope = this.scope;
+		const query = this.query;
+		this.states[scope] = searchState([], true, 0, undefined, false);
+		this.invalidate();
+		this.requestRender();
+		this.searchTimer = setTimeout(() => {
+			this.searchTimer = undefined;
+			void this.runSearch(token, scope, query);
+		}, delayMs);
+	}
+
+	private async runSearch(token: number, scope: Scope, query: string): Promise<void> {
+		const current = () => !this.closed && token === this.searchToken && scope === this.scope && query === this.query;
+		const apply = (state: SearchState) => {
+			if (!current()) return;
+			this.states[scope] = state;
+			this.clampSelection();
+			this.invalidate();
+			this.requestRender();
+		};
+
+		try {
+			const finalState = await searchScopedHistory(this.source, scope, query, apply, current);
+			apply(finalState);
+		} catch {
+			apply(searchState([], false, 0, undefined, true));
+		}
+	}
+
+	private clampSelection(): void {
+		const count = this.filteredItems().length;
+		this.selectedIndex = Math.max(0, Math.min(this.selectedIndex, Math.max(0, count - 1)));
+	}
+
+	private finish(value: PromptHistoryResult | undefined): void {
+		this.closed = true;
+		this.searchToken++;
+		if (this.searchTimer) clearTimeout(this.searchTimer);
+		this.searchTimer = undefined;
+		this.done(value);
 	}
 
 	private visibleStart(count: number): number {
@@ -347,6 +510,18 @@ class PromptHistoryPicker implements Component, Focusable {
 
 function formatPreview(text: string): string {
 	return text.replace(/[\r\n]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function formatCount(state: SearchState): string {
+	if (state.total === undefined) return `(${state.items.length})`;
+	const suffix = state.complete ? "" : "+";
+	return `(${state.items.length}${suffix}, scanned ${state.scanned}/${state.total})`;
+}
+
+function formatStatus(state: SearchState, count: number, start: number): string {
+	if (count === 0) return state.loading ? "Searching…" : "No matches";
+	const range = `Showing ${start + 1}-${Math.min(start + MAX_VISIBLE, count)} of ${count}`;
+	return state.loading ? `${range} · searching more…` : range;
 }
 
 function highlightMatches(text: string, query: string, theme: Theme): string {
