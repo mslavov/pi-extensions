@@ -80,10 +80,15 @@ export class ProjectService {
     const projects = await this.listProjects(signal);
     const cwdResolved = resolve(cwd);
     const rootResolved = resolve(root);
+    const cwdValidation = validateAutoIndexPath(cwdResolved);
+    if (!cwdValidation.ok) {
+      throw new Error(`refusing to infer codebase-memory project: ${cwdValidation.reason}`);
+    }
 
     const matching = projects
       .filter((project) => project.root_path)
       .map((project) => ({ project, rootPath: resolve(project.root_path!) }))
+      .filter(({ rootPath }) => validateAutoIndexPath(rootPath).ok)
       .filter(({ rootPath }) => cwdResolved === rootPath || cwdResolved.startsWith(`${rootPath}/`) || rootResolved === rootPath)
       .sort((a, b) => b.rootPath.length - a.rootPath.length);
 

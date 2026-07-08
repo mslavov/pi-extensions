@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { basename, parse, resolve } from "node:path";
+import { basename, join, parse, resolve } from "node:path";
 
 export type AutoIndexPathValidation =
   | { ok: true; path: string }
@@ -54,6 +54,15 @@ export function validateAutoIndexPath(path: string): AutoIndexPathValidation {
 
   if (isHomeBuiltinDirectory(normalized, home)) {
     return { ok: false, reason: `refusing to auto-index builtin user directory: ${basename(normalized)}` };
+  }
+
+  const workspace = normalizePath(join(home, "workspace"));
+  if (normalized === workspace) {
+    return { ok: false, reason: `refusing to auto-index workspace root: ${workspace}` };
+  }
+
+  if (!normalized.startsWith(`${workspace}/`)) {
+    return { ok: false, reason: `refusing to auto-index outside workspace children: ${normalized}` };
   }
 
   return { ok: true, path: normalized };

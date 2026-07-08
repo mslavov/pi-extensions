@@ -8,7 +8,14 @@ type IndexSession = {
   active: boolean;
   cwd: string;
   signal?: AbortSignal;
+  ui?: {
+    setStatus(key: string, text: string | undefined): void;
+  };
 };
+
+function setCbmStatus(session: IndexSession, status: "idx" | "on" | "off") {
+  session.ui?.setStatus("codebase-memory", `cbm: ${status}`);
+}
 
 export function registerLifecycle(pi: ExtensionAPI, services: CbmServices) {
   let indexInFlight = false;
@@ -19,17 +26,20 @@ export function registerLifecycle(pi: ExtensionAPI, services: CbmServices) {
     if (indexInFlight || !session.active || session.signal?.aborted) return;
 
     indexInFlight = true;
+    setCbmStatus(session, "idx");
     try {
-      await services.projects.indexCurrentRepo(session.cwd, session.signal);
+      const result = await services.projects.indexCurrentRepo(session.cwd, session.signal);
+      if (!session.active || session.signal?.aborted) return;
+      setCbmStatus(session, result.status === "indexed" ? "on" : "off");
+    } catch {
+      if (session.active && !session.signal?.aborted) setCbmStatus(session, "off");
     } finally {
       indexInFlight = false;
     }
   }
 
   function queueIndex(session: IndexSession) {
-    void indexCurrentRepo(session).catch(() => {
-      indexInFlight = false;
-    });
+    void indexCurrentRepo(session);
   }
 
   pi.on("before_agent_start", async (event) => ({
@@ -46,6 +56,7 @@ export function registerLifecycle(pi: ExtensionAPI, services: CbmServices) {
       active: true,
       cwd: ctx.cwd,
       signal: ctx.signal,
+      ui: ctx.ui,
     };
     activeSession = session;
 
