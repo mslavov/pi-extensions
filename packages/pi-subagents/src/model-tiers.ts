@@ -31,6 +31,9 @@ export const TIER_DEFAULT_THINKING: Record<ModelTier, ThinkingLevel> = {
 
 export const EMBEDDED_MODEL_TIERS: Record<ModelTier, ModelTierCandidate[]> = {
   high: [
+    { model: "openai-codex/gpt-5.6-sol", thinking: "xhigh" },
+    { model: "openai/gpt-5.6-sol", thinking: "xhigh" },
+    { model: "openrouter/openai/gpt-5.6-sol", thinking: "xhigh" },
     { model: "openai-codex/gpt-5.5", thinking: "xhigh" },
     { model: "openai/gpt-5.5-pro", thinking: "xhigh" },
     { model: "openai/gpt-5.5", thinking: "xhigh" },
@@ -75,6 +78,9 @@ export const EMBEDDED_MODEL_TIERS: Record<ModelTier, ModelTierCandidate[]> = {
     ]),
   ],
   medium: candidates("medium", [
+    "openai-codex/gpt-5.6-terra",
+    "openai/gpt-5.6-terra",
+    "openrouter/openai/gpt-5.6-terra",
     "openai-codex/gpt-5.4",
     "openai-codex/gpt-5.4-mini",
     "openai/gpt-5.4-mini",
@@ -110,6 +116,9 @@ export const EMBEDDED_MODEL_TIERS: Record<ModelTier, ModelTierCandidate[]> = {
     "xai/grok-4-fast",
   ]),
   low: candidates("low", [
+    "openai-codex/gpt-5.6-luna",
+    "openai/gpt-5.6-luna",
+    "openrouter/openai/gpt-5.6-luna",
     "openai/gpt-5.4-nano",
     "openai-codex/gpt-5.4-mini",
     "openai/gpt-5-mini",

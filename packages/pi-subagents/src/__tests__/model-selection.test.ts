@@ -10,7 +10,13 @@ vi.mock("@earendil-works/pi-ai", () => ({
 import { complete } from "@earendil-works/pi-ai";
 import { DEFAULT_AGENTS } from "../default-agents.js";
 import { resolveAgentInvocationConfig } from "../invocation-config.js";
-import { loadModelTiersConfig, type ModelTier, type ModelTierCandidate, type ModelTiersConfig } from "../model-tiers.js";
+import {
+  EMBEDDED_MODEL_TIERS,
+  loadModelTiersConfig,
+  type ModelTier,
+  type ModelTierCandidate,
+  type ModelTiersConfig,
+} from "../model-tiers.js";
 import {
   classifyPromptTierHeuristically,
   isReservedModelValue,
@@ -192,6 +198,23 @@ describe("subagent model selection", () => {
     expect(fallback.tierThinking).toBeUndefined();
   });
 
+  it("maps OpenAI GPT-5.6 models and effort to their matching tiers", async () => {
+    const reg = registry([
+      model("openai-codex", "gpt-5.6-sol"),
+      model("openai-codex", "gpt-5.6-terra"),
+      model("openai-codex", "gpt-5.6-luna"),
+    ]);
+    const config = tierConfig(EMBEDDED_MODEL_TIERS);
+
+    const high = await resolve("high", reg, config);
+    const medium = await resolve("medium", reg, config);
+    const low = await resolve("low", reg, config);
+
+    expect([high.model?.id, high.tierThinking]).toEqual(["gpt-5.6-sol", "xhigh"]);
+    expect([medium.model?.id, medium.tierThinking]).toEqual(["gpt-5.6-terra", "medium"]);
+    expect([low.model?.id, low.tierThinking]).toEqual(["gpt-5.6-luna", "low"]);
+  });
+
   it("loads model-tiers.json with embedded defaults, replacement tier arrays, and classifier override", () => {
     const root = mkdtempSync(join(tmpdir(), "pi-subagents-model-tiers-"));
     try {
@@ -219,7 +242,7 @@ describe("subagent model selection", () => {
       expect(config.classifierModel).toBe("project/classifier");
       expect(config.tiers.high).toEqual([{ model: "project/high", thinking: "xhigh" }]);
       expect(config.tiers.medium).toEqual([{ model: "global/medium", thinking: "medium" }]);
-      expect(config.tiers.low[0]).toEqual({ model: "openai/gpt-5.4-nano", thinking: "low" });
+      expect(config.tiers.low[0]).toEqual({ model: "openai-codex/gpt-5.6-luna", thinking: "low" });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **OpenAI model tiers** — GPT-5.6 Sol at `xhigh` now leads the high tier, Terra at `medium` leads the medium tier, and Luna at `low` leads the low tier for OpenAI Codex, the OpenAI API, and OpenRouter.
+
 ## [0.5.2] - 2026-03-26
 
 ### Fixed
