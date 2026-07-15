@@ -7,8 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Full-screen agent navigator** — `/agents` and `Alt+A` now open a live, keyboard-navigable view with Pi-native message, thinking, and tool rendering; a compact subagent-only bottom rail switches between active and retained agents, and running agents can be steered in place.
+
 ### Changed
 - **OpenAI model tiers** — GPT-5.6 Sol at `xhigh` now leads the high tier, Terra at `medium` leads the medium tier, and Luna at `low` leads the low tier for OpenAI Codex, the OpenAI API, and OpenRouter.
+- **Planning agents** — `Plan` now owns evidence synthesis and HTML plan authoring with scoped write tools; the separate `PlanWriter` default was removed. Agent-tool and RPC spawn requests for unknown or disabled types now fail instead of falling back to unrestricted `general-purpose`.
+
+### Fixed
+- **Agent navigation no longer stops work** — Escape and `q` close the navigator without cancelling subagents; stopping is an explicit selected-agent action.
 
 ## [0.5.2] - 2026-03-26
 

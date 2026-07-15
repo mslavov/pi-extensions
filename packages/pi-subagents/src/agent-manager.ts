@@ -9,12 +9,19 @@
 import { randomUUID } from "node:crypto";
 import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
+import { getAvailableTypes, isValidType } from "./agent-types.js";
+import { resumeAgent, runAgent, steerAgent, type ToolActivity } from "./agent-runner.js";
 import type { AgentModelInfo, AgentRecord, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
 import { cleanupWorktree, createWorktree, pruneWorktrees, } from "./worktree.js";
 
 export type OnAgentComplete = (record: AgentRecord) => void;
 export type OnAgentStart = (record: AgentRecord) => void;
+
+export type SteerResult =
+  | { status: "queued" }
+  | { status: "sent" }
+  | { status: "rejected"; reason: string }
+  | { status: "failed"; error: string };
 
 /** Default max concurrent background agents. */
 const DEFAULT_MAX_CONCURRENT = 4;
@@ -90,6 +97,9 @@ export class AgentManager {
     prompt: string,
     options: SpawnOptions,
   ): string {
+    if (!isValidType(type)) {
+      throw new Error(`Unknown or disabled agent type "${type}". Available types: ${getAvailableTypes().join(", ")}.`);
+    }
     const id = randomUUID().slice(0, 17);
     const abortController = new AbortController();
     const record: AgentRecord = {
@@ -156,13 +166,13 @@ export class AgentManager {
       onTextDelta: options.onTextDelta,
       onSessionCreated: (session) => {
         record.session = session;
-        // Flush any steers that arrived before the session was ready
-        if (record.pendingSteers?.length) {
+        // A stopped agent may still finish initialization; its queued input must stay cancelled.
+        if (record.status === "running" && record.pendingSteers?.length) {
           for (const msg of record.pendingSteers) {
             session.steer(msg).catch(() => {});
           }
-          record.pendingSteers = undefined;
         }
+        record.pendingSteers = undefined;
         options.onSessionCreated?.(session);
       },
     })
@@ -304,6 +314,27 @@ export class AgentManager {
     );
   }
 
+  async steer(id: string, message: string): Promise<SteerResult> {
+    const record = this.agents.get(id);
+    if (!record) {
+      return { status: "rejected", reason: `Agent not found: "${id}". It may have been cleaned up.` };
+    }
+    if (record.status !== "running") {
+      return { status: "rejected", reason: `Agent "${id}" is not running (status: ${record.status}).` };
+    }
+    if (!record.session) {
+      (record.pendingSteers ??= []).push(message);
+      return { status: "queued" };
+    }
+
+    try {
+      await steerAgent(record.session, message);
+      return { status: "sent" };
+    } catch (error) {
+      return { status: "failed", error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
   abort(id: string): boolean {
     const record = this.agents.get(id);
     if (!record) return false;
@@ -311,12 +342,14 @@ export class AgentManager {
     // Remove from queue if queued
     if (record.status === "queued") {
       this.queue = this.queue.filter(q => q.id !== id);
+      record.pendingSteers = undefined;
       record.status = "stopped";
       record.completedAt = Date.now();
       return true;
     }
 
     if (record.status !== "running") return false;
+    record.pendingSteers = undefined;
     record.abortController?.abort();
     record.status = "stopped";
     record.completedAt = Date.now();

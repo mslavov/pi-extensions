@@ -4,8 +4,9 @@ Local Pi package copied from `pi-cbm` and adapted for a smaller tool prompt.
 
 It keeps the useful Pi-native lifecycle from `pi-cbm`:
 
-- auto-index the current git root, or a safe non-git cwd when enabled;
-- refresh the current project periodically;
+- auto-index the current git root, or a safe non-git cwd when enabled, once at session startup;
+- deduplicate startup indexing across Pi sessions targeting the same repository;
+- disable SQLite mmap by default to keep shared-cache access safe across processes;
 - infer the current project from Pi's cwd;
 - compact codebase-memory output by default;
 - inject concise codebase-memory guidance.
@@ -51,4 +52,3 @@ Avoid installing this package together with `pi-cbm`, `pi-codebase-memory-mcp`, 
 ## Commands
 
 `/cbm` opens the copied `pi-cbm` settings menu for auto-index behavior.
-

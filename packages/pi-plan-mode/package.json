@@ -2,7 +2,7 @@
   "name": "pi-plan-mode",
   "version": "0.1.0",
   "type": "module",
-  "description": "Plan mode extension for pi – structured planning with visible Beads task graphs",
+  "description": "Plan mode extension for pi – adaptive HTML plans, review, and Beads execution handoff",
   "keywords": ["pi-package"],
   "license": "MIT",
   "author": "Milko Slavov <milko.slavov@gmail.com>",

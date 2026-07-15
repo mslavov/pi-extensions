@@ -5,7 +5,7 @@
  * Uses the callback form of setWidget for themed rendering.
  */
 
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { AgentManager } from "../agent-manager.js";
 import { getConfig } from "../agent-types.js";
 import type { AgentModelInfo, SubagentType } from "../types.js";
@@ -187,6 +187,7 @@ export class AgentWidget {
   constructor(
     private manager: AgentManager,
     private agentActivity: Map<string, AgentActivity>,
+    private navigatorShortcut?: string,
   ) {}
 
   /** Set the UI context (grabbed from first tool execution). */
@@ -342,7 +343,9 @@ export class AgentWidget {
     const maxBody = MAX_WIDGET_LINES - 1; // heading takes 1 line
     const totalBody = finishedLines.length + runningLines.length * 2 + (queuedLine ? 1 : 0);
 
-    const lines: string[] = [truncate(theme.fg(headingColor, headingIcon) + " " + theme.fg(headingColor, "Agents"))];
+    const heading = theme.fg(headingColor, headingIcon) + " " + theme.fg(headingColor, "Agents");
+    const shortcutHint = this.navigatorShortcut ? theme.fg("dim", ` · ${this.navigatorShortcut} open`) : "";
+    const lines: string[] = [truncate(visibleWidth(heading + shortcutHint) <= w ? heading + shortcutHint : heading)];
 
     if (totalBody <= maxBody) {
       // Everything fits — add all lines and fix up connectors for the last item.

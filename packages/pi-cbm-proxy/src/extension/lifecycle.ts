@@ -2,8 +2,6 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { CbmServices } from "../pi-tools/definitions.js";
 import { CODEBASE_MEMORY_PROMPT } from "./prompt.js";
 
-const AUTO_REFRESH_INTERVAL_MS = 60_000;
-
 type IndexSession = {
   active: boolean;
   cwd: string;
@@ -18,23 +16,18 @@ function setCbmStatus(session: IndexSession, status: "idx" | "on" | "off") {
 }
 
 export function registerLifecycle(pi: ExtensionAPI, services: CbmServices) {
-  let indexInFlight = false;
-  let refreshTimer: ReturnType<typeof setInterval> | undefined;
   let activeSession: IndexSession | undefined;
 
   async function indexCurrentRepo(session: IndexSession) {
-    if (indexInFlight || !session.active || session.signal?.aborted) return;
+    if (!session.active || session.signal?.aborted) return;
 
-    indexInFlight = true;
     setCbmStatus(session, "idx");
     try {
       const result = await services.projects.indexCurrentRepo(session.cwd, session.signal);
       if (!session.active || session.signal?.aborted) return;
-      setCbmStatus(session, result.status === "indexed" ? "on" : "off");
+      setCbmStatus(session, result.status === "skipped" ? "off" : "on");
     } catch {
       if (session.active && !session.signal?.aborted) setCbmStatus(session, "off");
-    } finally {
-      indexInFlight = false;
     }
   }
 
@@ -50,7 +43,6 @@ export function registerLifecycle(pi: ExtensionAPI, services: CbmServices) {
     services.settings.reload();
     services.stats.startSession(ctx);
     if (activeSession) activeSession.active = false;
-    if (refreshTimer) clearInterval(refreshTimer);
 
     const session: IndexSession = {
       active: true,
@@ -61,17 +53,12 @@ export function registerLifecycle(pi: ExtensionAPI, services: CbmServices) {
     activeSession = session;
 
     queueIndex(session);
-    refreshTimer = setInterval(() => {
-      queueIndex(session);
-    }, AUTO_REFRESH_INTERVAL_MS);
   });
 
   pi.on("session_shutdown", () => {
     services.stats.endSession();
     if (activeSession) activeSession.active = false;
     activeSession = undefined;
-    if (refreshTimer) clearInterval(refreshTimer);
-    refreshTimer = undefined;
   });
 
   pi.on("tool_execution_start", async (event) => {

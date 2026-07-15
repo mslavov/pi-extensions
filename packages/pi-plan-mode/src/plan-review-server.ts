@@ -362,6 +362,13 @@ function readSelection() {
   return { originalText: text, range, location: findLocation(doc, range) };
 }
 
+function captureSelection() {
+  const selection = readSelection();
+  if (!selection) return;
+  setPending(selection);
+  frame.contentWindow?.getSelection()?.removeAllRanges();
+}
+
 function findLocation(doc, range) {
   const node = range.startContainer.nodeType === Node.ELEMENT_NODE ? range.startContainer : range.startContainer.parentElement;
   const headings = Array.from(doc.querySelectorAll('h1,h2,h3,h4,h5,h6'));
@@ -396,6 +403,7 @@ function highlightRange(range, id) {
     mark.dataset.planReviewAnnotation = id;
     mark.style.background = 'rgba(251, 191, 36, .45)';
     mark.style.borderBottom = '2px solid rgb(245, 158, 11)';
+    mark.style.color = 'inherit';
     mark.style.cursor = 'pointer';
     mark.title = 'Plan review comment';
     mark.addEventListener('click', () => focusAnnotation(id));
@@ -497,14 +505,8 @@ async function submit(action) {
 
 frame.addEventListener('load', () => {
   const doc = planDocument();
-  doc?.addEventListener('mouseup', () => {
-    const selection = readSelection();
-    if (selection) setPending(selection);
-  });
-  doc?.addEventListener('keyup', () => {
-    const selection = readSelection();
-    if (selection) setPending(selection);
-  });
+  doc?.addEventListener('mouseup', captureSelection);
+  doc?.addEventListener('keyup', captureSelection);
 });
 
 document.getElementById('globalBtn').onclick = () => setPending({ type: 'global', location: 'Global' });

@@ -1,13 +1,11 @@
 /**
  * Plan Mode Extension — Integrated with @tintinweb/pi-subagents
  *
- * Iterative planning workflow inspired by Claude Code's plan mode:
- *   1. Explore codebase (directly + Explore agents for parallel search)
- *   2. Update the standalone HTML plan file incrementally as understanding grows
- *   3. Ask user clarifying questions via ask_user/questionnaire
- *   4. Include visible Beads tasks and a dependency graph
- *   5. Repeat until plan is complete
- *   6. Call exit_plan_mode for user approval
+ * Decision-complete planning workflow:
+ *   1. Ground the plan in targeted repository evidence
+ *   2. Clarify only decisions that cannot be discovered
+ *   3. Write one adaptive standalone HTML implementation plan
+ *   4. Review substantial plans independently, then request approval
  *
  * Commands:
  *   /plan [description]  Toggle plan mode, or start planning with a task
@@ -22,7 +20,8 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { getMarkdownTheme, type ExtensionAPI, type ExtensionContext, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
@@ -33,11 +32,15 @@ import { formatPlanReviewFeedback, startPlanReviewServer, type PlanReviewDecisio
 const AGENT_TOOL = "Agent";
 const EXPLORE_AGENT = "Explore";
 const PLAN_AGENT = "Plan";
-const PLAN_WRITER_AGENT = "PlanWriter";
+const EXPLORATION_AGENT_MODEL = "low";
+const EXPLORATION_AGENT_THINKING = "low";
+const PLANNING_AGENT_MODEL = "high";
+const PLANNING_AGENT_THINKING = "xhigh";
 const PI_NOTIFY_EVENT = "pi:notify";
 const PLAN_READY_EVENT = "pi:plan-mode:ready";
 const PLAN_CLOSED_EVENT = "pi:plan-mode:closed";
 const PLAN_MODE_BRIDGE_SYMBOL = Symbol.for("pi-plan-mode:external-bridge:v1");
+const PLAN_TEMPLATE = readFileSync(new URL("./plan-template.html", import.meta.url), "utf-8");
 
 type ExternalPlanReviewAction = "approve" | "refine" | "exit";
 
@@ -57,9 +60,9 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 	let planModeEnabled = false;
 	let planFilePath = "";
 	let planDescription = "";
+	let planAwaitingApproval = false;
+	let submittedPlanDigest = "";
 	let hasAgentTool = false;
-	let fullInstructionsSent = false;
-	let planPresentedThisAgent = false;
 	// Stash the command context (has newSession) for "execute with clean context"
 	let lastCommandCtx: ExtensionCommandContext | undefined;
 
@@ -71,10 +74,21 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		return dir;
 	}
 
-	function generatePlanPath(): string {
+	function allocateInitializedPlanPath(): string {
 		const now = new Date();
 		const slug = now.toISOString().replace(/[:.]/g, "-").replace("T", "_").slice(0, 19);
-		return join(getPlansDir(), `plan-${slug}.html`);
+		const plansDir = getPlansDir();
+
+		for (let attempt = 0; ; attempt += 1) {
+			const suffix = attempt === 0 ? "" : `-${attempt + 1}`;
+			const path = join(plansDir, `plan-${slug}${suffix}.html`);
+			try {
+				writeFileSync(path, PLAN_TEMPLATE, { encoding: "utf-8", flag: "wx" });
+				return path;
+			} catch (error) {
+				if ((error as { code?: string }).code !== "EEXIST") throw error;
+			}
+		}
 	}
 
 	function readPlanFile(path: string): string | null {
@@ -83,6 +97,10 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		} catch {
 			return null;
 		}
+	}
+
+	function digestPlan(content: string): string {
+		return createHash("sha256").update(content).digest("hex");
 	}
 
 	function openUrlInBrowser(url: string, fallbackMessage: string, ctx: ExtensionContext): void {
@@ -172,9 +190,11 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 	}
 
 	function enablePlanMode(ctx: ExtensionContext): void {
+		const initializedPlanPath = allocateInitializedPlanPath();
 		planModeEnabled = true;
-		fullInstructionsSent = false;
-		planFilePath = generatePlanPath();
+		planAwaitingApproval = false;
+		submittedPlanDigest = "";
+		planFilePath = initializedPlanPath;
 
 		const tools = pi.getAllTools().map((t) => t.name);
 		pi.setActiveTools(tools);
@@ -190,7 +210,8 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 	function disablePlanMode(ctx: ExtensionContext): void {
 		planModeEnabled = false;
 		planDescription = "";
-		fullInstructionsSent = false;
+		planAwaitingApproval = false;
+		submittedPlanDigest = "";
 		const tools = pi.getAllTools().map((t) => t.name);
 		pi.setActiveTools(tools);
 		ctx.ui.notify("Plan mode disabled. Full access restored.");
@@ -203,6 +224,8 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 			enabled: planModeEnabled,
 			planFilePath,
 			planDescription,
+			planAwaitingApproval,
+			submittedPlanDigest,
 		});
 	}
 
@@ -356,12 +379,14 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 				ctx.ui.notify("That plan is no longer active; review feedback was ignored.", "warning");
 				return;
 			}
+			planAwaitingApproval = false;
+			submittedPlanDigest = "";
+			persistState();
 			const feedback = decision.feedback?.trim();
 			if (!feedback) {
 				ctx.ui.notify("Review submitted without feedback; plan mode remains active.", "warning");
 				return;
 			}
-			planPresentedThisAgent = false;
 			sendUserMessage(ctx, feedback);
 			return;
 		}
@@ -404,6 +429,9 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		ctx: ExtensionContext,
 		options: { sendPreviewMessage?: boolean; onPreview?: (preview: string) => void } = {},
 	): Promise<string | undefined> {
+		planAwaitingApproval = false;
+		submittedPlanDigest = "";
+		persistState();
 		const headless = shouldUseHeadlessControls(ctx);
 		const content = readPlanFile(planFilePath);
 
@@ -424,7 +452,9 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 			]);
 
 			if (recovery === "Retry planning") {
-				planFilePath = generatePlanPath();
+				const initializedPlanPath = allocateInitializedPlanPath();
+				planAwaitingApproval = false;
+				planFilePath = initializedPlanPath;
 				persistState();
 				sendUserMessage(ctx, planDescription || "Create the implementation plan");
 			} else {
@@ -432,6 +462,10 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 			}
 			return;
 		}
+
+		planAwaitingApproval = true;
+		submittedPlanDigest = digestPlan(content);
+		persistState();
 
 		if (!headless) {
 			try {
@@ -467,13 +501,15 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 				ctx.ui.notify("That plan is no longer active; refinement was ignored.", "warning");
 				return preview;
 			}
+			planAwaitingApproval = false;
+			submittedPlanDigest = "";
+			persistState();
 			const refinement = await ctx.ui.editor("Describe what to change:", "");
 			if (refinement?.trim()) {
 				if (!planModeEnabled) {
 					ctx.ui.notify("That plan is no longer active; refinement was ignored.", "warning");
 					return preview;
 				}
-				planPresentedThisAgent = false;
 				sendUserMessage(ctx, refinement.trim());
 			}
 		} else if (choice === "Exit plan mode") {
@@ -488,9 +524,20 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 	 */
 	function approvePlanState(ctx: ExtensionContext): string | undefined {
 		if (!planModeEnabled) return "No active plan to approve.";
-		if (!planFilePath || !readPlanFile(planFilePath)) return buildPlanMissingMessage();
+		const content = planFilePath ? readPlanFile(planFilePath) : null;
+		if (!content) return buildPlanMissingMessage();
+		if (!planAwaitingApproval) return "The plan has not been submitted for approval. Call exit_plan_mode after finalizing the HTML plan.";
+		if (!submittedPlanDigest || digestPlan(content) !== submittedPlanDigest) {
+			planAwaitingApproval = false;
+			submittedPlanDigest = "";
+			persistState();
+			return "The HTML plan changed after it was submitted for approval. Call exit_plan_mode again to review the current artifact.";
+		}
 
 		planModeEnabled = false;
+		planDescription = "";
+		planAwaitingApproval = false;
+		submittedPlanDigest = "";
 		const tools = pi.getAllTools().map((t) => t.name);
 		pi.setActiveTools(tools);
 		updateStatus(ctx);
@@ -509,10 +556,10 @@ ${reviewNotes.trim()}`
 		return `${buildBeadsExecutionInstructions()}
 
 Coordinate execution from the main agent:
-1. Create one Bead per approved vertical slice before implementation, using the visible Vertical slices / Tasks to create section and dependency graph.
-2. Mirror the dependency graph in Beads with bd dependency syntax, bd link, or bd dep commands.
+1. Create one Bead per approved implementation task before implementation, using the visible Implementation tasks section and explicit task dependencies.
+2. Mirror explicit task dependencies in Beads with bd dependency syntax, bd link, or bd dep commands. Keep tasks sequential when parallel safety is not explicit.
 3. Keep coordination in the main agent: track dependencies, update Bead status, collect worker results, run final verification, and close completed Beads.
-4. Launch worker subagents only for independent ready graph branches. Pass each worker the slice ID/title, Bead ID, plan path, files, acceptance criteria, dependencies, verification steps, and suggested skills.
+4. Launch worker subagents only for independent ready tasks. Pass each worker the task ID/title, Bead ID, plan path, files, acceptance criteria, dependencies, verification steps, and suggested skills.
 5. Use run_in_background: true for independent work and keep overlapping-file or dependency-blocked work sequential.
 6. Use pi-beads for TUI visibility while bd CLI remains the source of task state.${notes}`;
 	}
@@ -542,7 +589,9 @@ Coordinate execution from the main agent:
 		if (!planModeEnabled) return "No active plan to refine.";
 		const text = refinement?.trim();
 		if (!text) return "Usage: /plan-refine <changes>";
-		planPresentedThisAgent = false;
+		planAwaitingApproval = false;
+		submittedPlanDigest = "";
+		persistState();
 		sendUserMessage(ctx, text);
 		return undefined;
 	}
@@ -550,12 +599,12 @@ Coordinate execution from the main agent:
 	function buildBeadsExecutionInstructions(): string {
 		return `Before making changes:
 1. Read the HTML plan file at \`${planFilePath}\`.
-2. Use the visible "Vertical slices / Tasks to create" section and task dependency graph as the source of truth.
+2. Use the visible "Implementation tasks" section and any explicit task dependencies as the source of truth.
 3. Load and follow the beads skill guidance. Use direct \`bd\` CLI commands for task management; pi-beads is display-only status visibility.
 4. Check the Beads workspace with \`bd status\` / \`bd ready\`. If no Beads database exists, ask the user to run \`bd init\` before continuing.
-5. Create one Bead per approved vertical slice with \`bd create\`, encoding graph dependencies with Beads dependency syntax such as \`--deps blocks:<id>\` or follow-up \`bd link\` / \`bd dep\` commands.
+5. Create one Bead per approved implementation task with \`bd create\`, encoding explicit dependencies with Beads dependency syntax such as \`--deps blocks:<id>\` or follow-up \`bd link\` / \`bd dep\` commands.
 6. Mark active work with \`bd update <id> --status in_progress\`, blocked work with \`bd update <id> --status blocked --append-notes ...\`, and completed work with \`bd close <id> --reason ...\`.
-7. Prefer parallel subagents for independent ready graph branches. Give each worker the slice ID/title, Bead ID, plan path, files, acceptance criteria, dependencies, verification steps, and suggested skills. Use \`run_in_background: true\` for independent work and keep overlapping-file or dependency-blocked work sequential.
+7. Prefer parallel subagents for independent ready tasks. Give each worker the task ID/title, Bead ID, plan path, files, acceptance criteria, dependencies, verification steps, and suggested skills. Use \`run_in_background: true\` for independent work and keep overlapping-file or dependency-blocked work sequential.
 8. Load and use relevant available skills for each task before acting. When no listed skill applies, proceed with standard tools.`;
 	}
 
@@ -569,8 +618,8 @@ Coordinate execution from the main agent:
 
 	function planWorkflowReminder(): string {
 		return hasAgentTool
-			? `Follow the agent-first workflow: ${EXPLORE_AGENT} context bundles, ${PLAN_WRITER_AGENT} HTML draft, ${PLAN_AGENT} vertical-slice breakdown, ${PLAN_WRITER_AGENT} finalization, then exit_plan_mode.`
-			: "Follow iterative workflow: explore codebase, interview user, and write the standalone HTML plan with visible tasks and a dependency graph incrementally.";
+			? `Ground the plan in repository evidence, use cheap ${EXPLORE_AGENT} agents for search, reserve model=${PLANNING_AGENT_MODEL}, thinking=${PLANNING_AGENT_THINKING} for plan synthesis or review, and call exit_plan_mode only when the HTML plan is decision-complete.`
+			: "Ground the plan in repository evidence, resolve material decisions, write the adaptive standalone HTML plan, and call exit_plan_mode only when it is decision-complete.";
 	}
 
 	function buildReviewFeedbackInstructions(): string {
@@ -578,158 +627,87 @@ Coordinate execution from the main agent:
 	}
 
 	function buildPlanFileStructureInstructions(): string {
-		return `### Final HTML Plan Contract
-Goal: Write the final plan directly to the HTML plan file (the only file you can edit) as a standalone HTML document.
+		return `### Authoritative HTML Plan
+The supplied HTML path is already initialized from the implementation-plan starter. Read the complete starter before editing it, then refine that same artifact directly. It is the only editable artifact and the implementation source of truth after approval.
 
-HTML artifact contract:
-- Write a complete <!doctype html> document with html, head, and body elements.
-- Use inline CSS and inline SVG only. Do not link external assets, scripts, stylesheets, images, fonts, or CDNs.
-- Keep the HTML source readable. Do not include hidden JSON, hidden script blocks, hidden machine-readable task metadata, or hidden machine-readable todo contracts.
-- Include visible sections with clear headings: Context, Recommended approach, Vertical slices / Tasks to create, Task dependency graph, Implementation steps, Files to modify, Existing code to reuse, Verification.
-- The Vertical slices / Tasks to create section must list the Beads that should be created after approval. Each vertical slice should include title, outcome/acceptance criteria, likely files, dependencies or ordering constraints, parallel-safety, verification steps, and suggested skills when an available skill clearly applies.
-- The Task dependency graph must be an inline SVG that mirrors how Beads dependencies should be managed. Show each proposed Bead as a node and draw arrows from prerequisite tasks to dependent tasks. Make independent branches visually obvious so execution can delegate them in parallel.
-- Include only your recommended approach, not all alternatives.
-- Keep the plan concise enough to scan quickly, but detailed enough to execute effectively.
-- Include the paths of critical files to be modified.
-- Reference existing functions and utilities you found that should be reused, with file paths.
-- Include at least one useful, restrained diagram using inline SVG. Usually choose an architecture, flowchart, sequence diagram, or dependency graph based on the plan.
-- When the diagram-design skill is available, load and follow it before drawing diagrams. Keep diagrams readable with clear labels and minimal visual noise.`;
+Strict artifact rules:
+- Preserve the starter's paper/ink/accent visual system and its existing responsive, accessible cards, callouts, tables, and task primitives. Adapt them to the plan instead of replacing the design with a new theme or rendering abstraction.
+- Replace every visible [[Replace...]] placeholder with final content. Adapt or remove every optional or example section that is irrelevant to this plan.
+- Write a complete <!doctype html> document with semantic html, head, and body elements.
+- Use inline CSS and inline SVG only. Do not use scripts or link external assets, stylesheets, images, fonts, or CDNs.
+- Keep the source readable. Do not add hidden JSON, hidden task metadata, or machine-readable todo contracts.
+- Present one recommended approach. Include a rejected alternative only when its trade-off explains a consequential decision.
+- Keep the plan concise by default and decision-complete: enough detail for another engineer or agent to implement safely without inventing product or architecture policy.
+
+Required content. Use the canonical **Implementation tasks** heading for execution handoff; adapt the other headings to the task:
+- **Summary** — the problem or current constraint, desired outcome, and core implementation move.
+- **Recommended changes** — behavior and design changes grouped by subsystem or user-visible flow, with critical paths or symbols only where they remove ambiguity.
+- **Implementation tasks** — the Beads to create after approval. Use the number of tasks justified by real delivery, dependency, ownership, or verification boundaries; never target an arbitrary count. Each task includes its outcome, acceptance criteria, likely files when useful, explicit dependencies, parallel-safety, verification, and clearly relevant skills.
+- **Verification** — focused tests and quality commands, plus important manual or integration scenarios.
+- **Decisions and assumptions** — settled choices, user-approved defaults, and any remaining implementation-safe assumptions.
+
+Add only when relevant:
+- Customer/user problem, goals, non-goals, requirements, and acceptance criteria for product or system work.
+- Current-system evidence, ownership boundaries, reusable code, and current-to-target divergence.
+- Interfaces, schemas, data flow, security/privacy, failure modes, observability, migration, rollout, and rollback.
+- A dependency graph when multiple tasks have meaningful ordering or parallel branches.
+- An architecture, sequence, flow, or state diagram when it communicates the design more clearly than prose.
+- Review findings with an explicit accepted, deferred, or rejected disposition.
+- ADR candidates for cross-component, hard-to-reverse decisions that rejected a real alternative.
+
+Shape the plan to the work:
+- Product/system changes: lead with user value and order tasks by the smallest independently releasable outcome, not by architecture layer.
+- Refactors: state preserved behavior and use behavior-preserving checkpoints.
+- Bugs: capture observed behavior, root-cause evidence, the targeted fix, and regression coverage.
+
+Visual design:
+- Use a restrained system-font layout with strong hierarchy, readable cards/tables/callouts, responsive styling, and accessible contrast.
+- For multi-component, stateful, async, security-boundary, migration, or dependency-heavy plans, proactively inspect the skills that are actually available and use a relevant diagram or visualization skill when one is present.
+- Diagrams are optional. Final diagrams must be focused, accessible inline SVG with role="img", aria-labelledby referencing a <title> and <desc>, readable labels and contrast, and text or shape semantics so meaning does not rely on color alone. Omit diagrams for simple work when prose or a table is clearer. Never invent or invoke an unavailable skill.`;
 	}
 
-	function buildAgentFirstWorkflowInstructions(): string {
-		return `## Plan Workflow
+	function buildPlanningWorkflowInstructions(): string {
+		const delegation = hasAgentTool
+			? `### Agent Workflow
+Use direct read-only tools only for quick checks needed to brief agents or validate their evidence. Keep delegated scopes independent and use the minimum number of agents needed for complete coverage.
 
-### Phase 1: Context Bundles
-Goal: identify the right context for planning without polluting the main context.
+- Use one or more ${EXPLORE_AGENT} agents for distinct repository questions that can run independently. Prefer the cheap configuration \`model: "${EXPLORATION_AGENT_MODEL}"\`, \`thinking: "${EXPLORATION_AGENT_THINKING}"\`. Give each agent a narrow focus and request a detailed evidence bundle with paths, symbols, line numbers, patterns, constraints, risks, and unresolved questions. Run independent calls in the background and do not duplicate their work in the main agent.
+- After the required evidence is collected, launch one ${PLAN_AGENT} at \`model: "${PLANNING_AGENT_MODEL}"\`, \`thinking: "${PLANNING_AGENT_THINKING}"\`. Pass the exact HTML path, user intent, constraints, evidence bundles, and the full artifact contract below. The ${PLAN_AGENT} owns plan synthesis and writes the HTML artifact. Keep one plan writer at a time.
+- If ${PLAN_AGENT} is unavailable or disabled, do not substitute an unrestricted general-purpose agent; author the artifact directly using the fallback workflow.
+- For substantial, cross-component, security-sensitive, migration-heavy, or otherwise risky work, optionally launch a separate ${PLAN_AGENT} as an independent adversarial reviewer after a coherent draft exists. Ask it to return findings without editing, covering unsupported assumptions, contract gaps, security/privacy issues, rollout hazards, verification gaps, and incorrect task dependencies. Require evidence and a recommendation for every finding, then send accepted revisions to the writing ${PLAN_AGENT}.
+- Keep clarification with the root agent. Subagents return evidence or critique; they do not decide user preferences.
 
-1. Focus on the user's intent, constraints, and likely code paths. Use direct read-only tools only for quick targeted checks needed to brief ${EXPLORE_AGENT} agents.
-2. Launch 1-3 ${EXPLORE_AGENT} agents to produce context bundles.
-   - Use 1 agent when the task is isolated to known files, specific paths, or a small targeted change.
-   - Use multiple agents when scope is uncertain, multiple areas are involved, or you need to understand existing patterns before planning.
-   - If using multiple agents, give each a specific search focus and set run_in_background: true. Collect results with get_subagent_result using wait: true.
-   - Ask each ${EXPLORE_AGENT} agent to return an extensive context bundle, not a concise summary.
-   - Each bundle must include files, functions/classes, line numbers, CLI/search/read operations performed and important results, existing patterns and constraints, dead ends or irrelevant areas, risks/gaps, and open questions.
-   - Quality over quantity: use the minimum number of agents necessary.
-   - Do not proceed to Phase 2 until the exploration results you need have completed.
+After an independent review, revise the same HTML artifact and record each material finding as accepted, deferred with rationale, or rejected with rationale.`
+			: `### Delegation
+No Agent tool is available. Perform targeted exploration and review directly with read-only tools.`;
 
-### Phase 2: PlanWriter Draft
-Goal: have a planning agent create the implementation plan, including the initial standalone HTML artifact.
+		const authoring = hasAgentTool
+			? `Have the ${PLAN_AGENT} write and refine one coherent HTML artifact after enough evidence exists. A lightweight skeleton is acceptable while a user decision is pending, but it is not ready for approval. The main agent coordinates clarification, checks the artifact against user intent and evidence, and keeps all plan-file writes serialized through the writing ${PLAN_AGENT}.`
+			: "Write and refine one coherent HTML artifact directly after enough evidence exists. A lightweight skeleton is acceptable while a user decision is pending, but it is not ready for approval.";
 
-Launch one ${PLAN_WRITER_AGENT} agent with the HTML plan file path and the collected context bundles. The ${PLAN_WRITER_AGENT} is responsible for reading any additional proper context, loading relevant skills, proposing the solution, and writing the initial standalone HTML plan draft.
+		return `## Planning Workflow
 
-**Guidelines:**
-- Pass the exact plan file path: \`${planFilePath}\`.
-- Forward the full context bundles. Do not compress them into a lossy summary unless the bundle is too large; preserve file paths, line references, command results, and open questions.
-- Instruct ${PLAN_WRITER_AGENT} to rely on the provided context first and perform only targeted reads when a detail is missing, ambiguous, or conflicting.
-- Instruct ${PLAN_WRITER_AGENT} to load and follow relevant skills, especially diagram-design when drawing diagrams.
-- Serialize plan-file writes. Do not run multiple ${PLAN_WRITER_AGENT} agents against the same plan file in parallel.
+### 1. Ground in Evidence
+Start with targeted non-mutating exploration. Resolve repository facts from code, tests, configuration, docs, and history before asking the user. Identify current behavior, ownership, reusable patterns, constraints, and practical verification commands.
 
-In the ${PLAN_WRITER_AGENT} prompt:
-- Provide the user's requirements and constraints
-- Provide every relevant Phase 1 context bundle
-- Ask it to write the HTML draft directly to the plan file path
-- Ask it to return the plan path, recommended approach summary, and unresolved questions only
+### 2. Resolve Material Decisions
+Clarify only choices that materially change scope, behavior, architecture, compatibility, or risk and cannot be discovered. Prefer one focused ask_user question, or a short wizard for independent decisions. Put the recommended option first and record defaulted choices as assumptions.
 
-### Phase 3: Vertical Slice Breakdown
-Goal: have a separate planning agent break the proposed solution into independently implementable and verifiable vertical slices.
+Do not ask the user for approval through ask_user. Approval is handled by exit_plan_mode.
 
-After the ${PLAN_WRITER_AGENT} draft is complete, launch one ${PLAN_AGENT} agent as the task-breakdown agent. Provide the plan file path, the selected approach, and the context/design outputs. Ask it to return 4-10 vertical slices of work.
+${delegation}
 
-Each vertical slice must include:
-- Bead title
-- outcome/acceptance criteria
-- likely files
-- dependencies or ordering constraints
-- whether it is safe to run in parallel
-- verification steps for that slice
-- suggested skill(s), if an available skill clearly applies
-
-The task-breakdown agent must also return a dependency graph / DAG model in prose: nodes, arrows from prerequisite slices to dependent slices, and which branches can run in parallel.
-Do not create or mutate Beads in plan mode. Beads are created only after user approval by the executing agent using the beads skill and direct bd CLI commands.
-
-### Phase 4: PlanWriter Finalization
-Goal: update the same HTML plan file so it contains the final recommended solution, vertical slices, and dependency graph.
-
-Launch or resume one ${PLAN_WRITER_AGENT} agent with the plan file path, the draft plan, and the vertical-slice breakdown. Ask it to update the HTML plan with the final visible sections and diagrams required below.
-
-The ${PLAN_WRITER_AGENT} must include the vertical slices and dependency graph in the final HTML plan. It should not create Beads or edit any files other than the supplied HTML plan file.
-
-### Phase 5: Main-Agent Review
-Goal: validate the subagent-produced plan against the user's intent and the exploration evidence.
-1. Check whether the recommended plan solves the user's actual request and respects known constraints.
-2. Check whether the vertical slices and dependency graph match the implementation order and identify safe parallel branches.
-3. Do not re-read files by default. Re-read only when the plan conflicts with exploration findings, depends on a code detail missing from the summaries, contains an unsupported claim, or needs exact line-level context.
-4. Prefer targeted follow-up prompts to ${EXPLORE_AGENT}, ${PLAN_AGENT}, or ${PLAN_WRITER_AGENT} over broad direct exploration.
-5. Do not rewrite the final plan yourself except for small corrections to the HTML file when necessary; the final plan should be authored by ${PLAN_WRITER_AGENT}.
-6. Use ask_user to clarify any remaining requirements or decisions that cannot be resolved from code.
+### 3. Author the Plan
+${authoring}
 
 ${buildPlanFileStructureInstructions()}
 
-### Phase 7: Call exit_plan_mode
-At the very end of your turn, once you have asked necessary questions and are happy with the final HTML plan file, call exit_plan_mode to request user approval.
+Do not create or mutate Beads in plan mode. The approved implementation tasks become Beads during execution.
 
-Your turn should only end by either:
-- Using ask_user to gather more information from the user
-- Calling the exit_plan_mode tool when the plan is ready for approval
+### 4. Finalize Explicitly
+Before approval, confirm that the plan matches the user's intent, every claim is supported or labeled as an assumption, task boundaries follow delivery/dependency reality, and verification proves the desired outcome. Before calling exit_plan_mode, remove every remaining [[Replace...]] placeholder and every irrelevant optional or example section. Preserve the starter's visual system. Do not invent schemas, fallback rules, rollout policy, or edge-case behavior unless the request or repository requires them.
 
-**Important:** Call the exit_plan_mode tool to request plan approval. Do NOT print exit_plan_mode as text. Do NOT ask about plan approval via text or ask_user. Do NOT say "Is this plan okay?" or "Should I proceed?" — call the tool for that.`;
-	}
-
-	function buildIterativeWorkflowInstructions(): string {
-		const exploreAgentHint = hasAgentTool
-			? ` You can use the ${EXPLORE_AGENT} agent type through the ${AGENT_TOOL} tool to parallelize complex searches without filling your context, though for straightforward queries direct tools are simpler.`
-			: "";
-
-		return `## Iterative Planning Workflow
-
-You are pair-planning with the user. Explore the code to build context, ask the user questions when you hit decisions you can't make alone, and write your findings into the standalone HTML plan file as you go.
-
-### The Loop
-
-Repeat this cycle until the plan is complete:
-
-1. **Explore** — Use read, bash, grep, find, ls to read code. Look for existing functions, utilities, and patterns to reuse.${exploreAgentHint}
-2. **Update the HTML plan file** — After each discovery, immediately capture what you learned in a complete standalone HTML document, including visible tasks and the dependency graph as they become clear. Don't wait until the end.
-3. **Ask the user** — When you hit an ambiguity or decision you can't resolve from code alone, use ask_user. Then go back to step 1.
-
-### First Turn
-
-Start by quickly scanning a few key files to form an initial understanding of the task scope. Then write a skeleton standalone HTML plan with the required visible sections and ask the user your first round of questions. Don't explore exhaustively before engaging the user.
-
-### Asking Good Questions
-
-- Never ask what you could find out by reading the code
-- Batch related questions together
-- Focus on things only the user can answer: requirements, preferences, tradeoffs, edge case priorities
-- Scale depth to the task — a vague feature request needs many rounds; a focused bug fix may need one or none
-
-### HTML Plan File Structure
-
-Maintain a complete standalone HTML document as the plan source of truth. Fill it out as you go:
-- Start with <!doctype html> and include html, head, and body elements.
-- Use inline CSS and inline SVG only. Do not link external assets, scripts, stylesheets, images, fonts, or CDNs.
-- Keep the HTML source readable. Do not include hidden JSON, hidden script blocks, hidden machine-readable task metadata, or any machine-readable todo contract.
-- Include visible sections with clear headings: Context, Recommended approach, Vertical slices / Tasks to create, Task dependency graph, Implementation steps, Files to modify, Existing code to reuse, Verification.
-- The Vertical slices / Tasks to create section must list the Beads that should be created after approval. Each vertical slice should include title, outcome/acceptance criteria, likely files, dependencies or ordering constraints, parallel-safety, verification steps, and suggested skills when an available skill clearly applies.
-- The Task dependency graph must be an inline SVG that mirrors how Beads dependencies should be managed. Show each proposed Bead as a node and draw arrows from prerequisite tasks to dependent tasks. Make independent branches visually obvious so execution can delegate them in parallel.
-- Include at least one useful, restrained diagram using inline SVG. Usually choose an architecture, flowchart, sequence diagram, or dependency graph based on the plan.
-- When the diagram-design skill is available, load and follow it before drawing diagrams.
-
-Do not create or mutate Beads in plan mode. Beads are created only after user approval by the executing agent using the beads skill and direct bd CLI commands.
-
-Keep it concise enough to scan quickly, but detailed enough to execute effectively.
-
-### When to Converge
-
-Your plan is ready when the HTML document addresses all ambiguities and covers: what to change, which vertical-slice Beads to create, the Beads-style dependency graph, which files to modify, what existing code to reuse (with file paths), and how to verify each slice and the full change.
-
-### Ending Your Turn
-
-Your turn should only end by either:
-- Using ask_user to gather more information from the user
-- Calling the exit_plan_mode tool when the plan is ready for approval
-
-**Important:** Call the exit_plan_mode tool to request plan approval. Do NOT print exit_plan_mode as text. Do NOT ask about plan approval via text or ask_user. Do NOT say "Is this plan okay?" or "Should I proceed?" — call the tool for that.`;
+Call exit_plan_mode only when the artifact is decision-complete. Do not print the tool name as prose and do not ask “Should I proceed?”`;
 	}
 
 	// ---- Tools (model-initiated plan mode control) ----
@@ -752,7 +730,7 @@ Do NOT use for:
 - Tasks where the user gave very specific, detailed instructions
 - Pure research/exploration tasks (use the Agent tool with Explore type instead)
 
-Plan mode keeps all registered tools available while restricting direct write/edit tool calls to the HTML plan file. When the Agent tool is available, use Explore for context bundles, PlanWriter to author the HTML plan, and Plan for vertical-slice breakdown; otherwise, explore directly and build the plan incrementally.`,
+Plan mode keeps all registered tools available while restricting direct write/edit tool calls to the HTML plan file. Planning depth, sections, diagrams, and delegation should scale to the task. Prefer cheap low-effort Explore agents for detailed repository evidence; use a high-effort Plan agent to synthesize and write the HTML artifact.`,
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
 			if (planModeEnabled) {
@@ -785,7 +763,6 @@ Use ask_user ONLY to clarify requirements or choose between approaches BEFORE fi
 			if (!planModeEnabled) {
 				return { content: [{ type: "text" as const, text: "Not in plan mode." }], details: undefined };
 			}
-			planPresentedThisAgent = true;
 			const preview = await presentPlan(ctx, {
 				sendPreviewMessage: false,
 				onPreview: (text) => {
@@ -831,7 +808,7 @@ Use ask_user ONLY to clarify requirements or choose between approaches BEFORE fi
 	});
 
 	pi.registerCommand("plan-approve", {
-		description: "Approve the current plan and execute it without opening the approval UI",
+		description: "Approve a plan submitted through exit_plan_mode and execute it without opening the approval UI",
 		handler: async (_args, ctx) => {
 			await executeWithBeadsCoordinator(ctx);
 		},
@@ -890,6 +867,9 @@ Use ask_user ONLY to clarify requirements or choose between approaches BEFORE fi
 					reason: `Plan mode: only the HTML plan file can be edited.\nAllowed: ${planFilePath}\nAttempted: ${targetPath}`,
 				};
 			}
+			planAwaitingApproval = false;
+			submittedPlanDigest = "";
+			persistState();
 			return; // allow write/edit to the HTML plan file
 		}
 
@@ -907,78 +887,37 @@ Use ask_user ONLY to clarify requirements or choose between approaches BEFORE fi
 	});
 
 	// Inject planning instructions
-	pi.on("before_agent_start", async (_event, _ctx) => {
+	pi.on("before_agent_start", async (event) => {
 		if (!planModeEnabled) return;
 		detectAvailableTools();
 
-		// Sparse reminder on subsequent turns
-		if (fullInstructionsSent) {
-			return {
-				message: {
-					customType: "plan-mode-context",
-					content: `[PLAN MODE ACTIVE]
-Plan mode still active (see full instructions earlier in conversation). Direct write/edit tool calls are limited to the HTML plan file (\`${planFilePath}\`). Do not mutate Beads before approval.
-${planWorkflowReminder()}
-End turns with ask_user (for clarifications) or by calling the exit_plan_mode tool (for plan approval).
-Do not ask about plan approval via text or ask_user — call the exit_plan_mode tool instead.
-${buildReviewFeedbackInstructions()}`,
-					display: false,
-				},
-			};
-		}
-
-		fullInstructionsSent = true;
-
 		const planExistsInfo = readPlanFile(planFilePath)
-			? `An HTML plan file already exists at \`${planFilePath}\`. You can read it and make incremental edits.`
+			? `The initialized HTML plan starter exists at \`${planFilePath}\`. Read it completely and refine that same artifact while preserving its visual system.`
 			: `No HTML plan file exists yet. Create a standalone HTML plan at \`${planFilePath}\` using the write tool.`;
 
 		return {
-			message: {
-				customType: "plan-mode-context",
-				content: `[PLAN MODE ACTIVE]
+			systemPrompt: `${event.systemPrompt}
+
+[PLAN MODE ACTIVE]
 You are in plan mode. Keep implementation work out of plan mode; direct write/edit tool calls are only allowed for the HTML plan file below. Other registered tools remain available. Do not create, update, close, or link Beads before approval; include proposed Beads visibly in the plan instead.
 
 ## HTML Plan File
 ${planExistsInfo}
-Build your standalone HTML plan incrementally by writing to or editing this file. This is the ONLY file you may edit.
+This is the ONLY file you may edit.
 
 ${buildReviewFeedbackInstructions()}
 
-${hasAgentTool ? buildAgentFirstWorkflowInstructions() : buildIterativeWorkflowInstructions()}${planDescription ? `\n\n## Task\n${planDescription}` : ""}`,
-				display: false,
-			},
+${buildPlanningWorkflowInstructions()}${planDescription ? `\n\n## Task\n${planDescription}` : ""}`,
 		};
 	});
 
-	// Filter stale plan mode context from conversation
-	pi.on("context", async (event) => {
-		if (planModeEnabled) return;
-		return {
-			messages: event.messages.filter((m) => {
-				const msg = m as any;
-				if (msg.customType === "plan-mode-context") return false;
-				if (msg.role !== "user") return true;
-				const content = msg.content;
-				if (typeof content === "string") return !content.includes("[PLAN MODE ACTIVE]");
-				if (Array.isArray(content)) {
-					return !content.some((c: any) => c.type === "text" && c.text?.includes("[PLAN MODE ACTIVE]"));
-				}
-				return true;
-			}),
-		};
-	});
-
-	pi.on("agent_start", async () => {
-		planPresentedThisAgent = false;
-	});
-
-	// After agent finishes in plan mode, present the plan controls.
-	pi.on("agent_end", async (_event, ctx) => {
-		if (!planModeEnabled || planPresentedThisAgent) return;
-		if (!ctx.hasUI && !readPlanFile(planFilePath)) return;
-		await presentPlan(ctx);
-	});
+	// System-prompt instructions supersede persisted plan-mode context entries.
+	pi.on("context", async (event) => ({
+		messages: event.messages.filter((message) => {
+			const msg = message as { customType?: unknown };
+			return msg.customType !== "plan-mode-context";
+		}),
+	}));
 
 	// ---- Session Restore ----
 
@@ -992,16 +931,18 @@ ${hasAgentTool ? buildAgentFirstWorkflowInstructions() : buildIterativeWorkflowI
 		const entries = ctx.sessionManager.getEntries();
 		const saved = entries
 			.filter((e: any) => e.type === "custom" && e.customType === "plan-mode")
-			.pop() as { data?: { enabled: boolean; planFilePath?: string; planDescription?: string } } | undefined;
+			.pop() as { data?: { enabled: boolean; planFilePath?: string; planDescription?: string; planAwaitingApproval?: boolean; submittedPlanDigest?: string } } | undefined;
 
 		if (saved?.data) {
 			planModeEnabled = saved.data.enabled ?? planModeEnabled;
 			planFilePath = saved.data.planFilePath ?? planFilePath;
 			planDescription = saved.data.planDescription ?? planDescription;
+			planAwaitingApproval = saved.data.planAwaitingApproval ?? planAwaitingApproval;
+			submittedPlanDigest = saved.data.submittedPlanDigest ?? submittedPlanDigest;
 		}
 
 		if (planModeEnabled) {
-			if (!planFilePath) planFilePath = generatePlanPath();
+			if (!planFilePath) planFilePath = allocateInitializedPlanPath();
 			const tools = pi.getAllTools().map((t) => t.name);
 			pi.setActiveTools(tools);
 		}

@@ -13,7 +13,7 @@ Remote: `git@github.com:mslavov/pi-extensions.git`
 | [pi-context](packages/pi-context/) | Displays current pi context window usage with `/context` |
 | [pi-headroom](packages/pi-headroom/) | Transparent LLM context compression using Headroom |
 | [pi-markitdown](packages/pi-markitdown/) | Reads PDFs, Office files, images, and other non-text files as Markdown via MarkItDown |
-| [pi-plan-mode](packages/pi-plan-mode/) | Structured planning via scout/planner subagents with Beads task graphs |
+| [pi-plan-mode](packages/pi-plan-mode/) | Adaptive HTML planning with cost-aware delegation, review, and Beads execution handoff |
 | [pi-powerline](packages/pi-powerline/) | Configurable Powerline-style footer for pi |
 | [pi-prompt-history](packages/pi-prompt-history/) | Ctrl+R prompt history picker across projects, project, or session |
 | [pi-progressive-context](packages/pi-progressive-context/) | Lazy nested AGENTS.md / CLAUDE.md context loading for pi |

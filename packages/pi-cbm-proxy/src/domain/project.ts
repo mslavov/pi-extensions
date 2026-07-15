@@ -1,10 +1,81 @@
-import { resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { CbmClient } from "../cbm/client.js";
 import { indexTimeoutMs } from "../cbm/timeouts.js";
 import { errorText } from "../shared/strings.js";
 import { validateAutoIndexPath } from "./auto-index-paths.js";
 
 const AUTO_INDEX_MODE = "full";
+const INDEX_LOCK_ROOT = join(tmpdir(), `pi-cbm-proxy-${process.getuid?.() ?? 0}`, "index-locks");
+const INDEX_LOCK_STARTUP_GRACE_MS = 5_000;
+
+type IndexLockOwner = {
+  pid: number;
+  repoPath: string;
+  startedAt: number;
+};
+
+type IndexLock = {
+  release(): Promise<void>;
+};
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+async function readLockOwner(path: string): Promise<IndexLockOwner | undefined> {
+  try {
+    const owner = JSON.parse(await readFile(join(path, "owner.json"), "utf8")) as Partial<IndexLockOwner>;
+    if (typeof owner.pid !== "number" || typeof owner.repoPath !== "string" || typeof owner.startedAt !== "number") return undefined;
+    return owner as IndexLockOwner;
+  } catch {
+    return undefined;
+  }
+}
+
+async function tryAcquireIndexLock(repoPath: string): Promise<IndexLock | undefined> {
+  await mkdir(INDEX_LOCK_ROOT, { recursive: true, mode: 0o700 });
+  const key = createHash("sha256").update(resolve(repoPath)).digest("hex");
+  const lockPath = join(INDEX_LOCK_ROOT, key);
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await mkdir(lockPath, { mode: 0o700 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+
+      const owner = await readLockOwner(lockPath);
+      if (owner && isProcessAlive(owner.pid)) return undefined;
+      if (!owner) {
+        const lockStat = await stat(lockPath).catch(() => undefined);
+        if (lockStat && Date.now() - lockStat.mtimeMs < INDEX_LOCK_STARTUP_GRACE_MS) return undefined;
+      }
+
+      await rm(lockPath, { recursive: true, force: true });
+      continue;
+    }
+
+    try {
+      const owner: IndexLockOwner = { pid: process.pid, repoPath, startedAt: Date.now() };
+      await writeFile(join(lockPath, "owner.json"), `${JSON.stringify(owner)}\n`, "utf8");
+      return {
+        release: () => rm(lockPath, { recursive: true, force: true }),
+      };
+    } catch (error) {
+      await rm(lockPath, { recursive: true, force: true });
+      throw error;
+    }
+  }
+
+  return undefined;
+}
 
 export type CbmProject = {
   name: string;
@@ -32,6 +103,10 @@ export type IndexResult =
       nodes?: number;
       edges?: number;
       data: Record<string, unknown>;
+    }
+  | {
+      status: "deduplicated";
+      reason: string;
     }
   | {
       status: "skipped";
@@ -122,18 +197,27 @@ export class ProjectService {
       return { status: "skipped", reason: target.reason };
     }
 
-    const result = await this.cbm.callTool(
-      "index_repository",
-      { repo_path: target.path, mode: AUTO_INDEX_MODE },
-      { signal, timeoutMs: indexTimeoutMs(undefined) },
-    );
-    const data = result.data && typeof result.data === "object" ? (result.data as Record<string, unknown>) : {};
-    return {
-      status: "indexed",
-      project: typeof data.project === "string" ? data.project : "ready",
-      nodes: typeof data.nodes === "number" ? data.nodes : undefined,
-      edges: typeof data.edges === "number" ? data.edges : undefined,
-      data,
-    };
+    const lock = await tryAcquireIndexLock(target.path);
+    if (!lock) {
+      return { status: "deduplicated", reason: "another Pi session is already indexing this repository" };
+    }
+
+    try {
+      const result = await this.cbm.callTool(
+        "index_repository",
+        { repo_path: target.path, mode: AUTO_INDEX_MODE },
+        { signal, timeoutMs: indexTimeoutMs(undefined) },
+      );
+      const data = result.data && typeof result.data === "object" ? (result.data as Record<string, unknown>) : {};
+      return {
+        status: "indexed",
+        project: typeof data.project === "string" ? data.project : "ready",
+        nodes: typeof data.nodes === "number" ? data.nodes : undefined,
+        edges: typeof data.edges === "number" ? data.edges : undefined,
+        data,
+      };
+    } finally {
+      await lock.release();
+    }
   }
 }

@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>[[Replace with plan title]]</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --paper: #f5f5f5;
+      --paper-2: #ececec;
+      --surface: #ffffff;
+      --ink: #2d3142;
+      --muted: #4f5d75;
+      --soft: #626d83;
+      --rule: rgba(45, 49, 66, 0.14);
+      --rule-strong: rgba(45, 49, 66, 0.28);
+      --accent: #d95726;
+      --accent-tint: rgba(217, 87, 38, 0.09);
+      --link: #2e5aa8;
+      --link-tint: rgba(46, 90, 168, 0.08);
+      --ok: #326b4b;
+      --ok-tint: rgba(50, 107, 75, 0.08);
+      --code-bg: #e9eaed;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 16px;
+      line-height: 1.58;
+    }
+    ::selection { background: #f5c7b5; color: inherit; }
+    .skip-link {
+      position: absolute;
+      left: 16px;
+      top: -80px;
+      z-index: 1;
+      padding: 10px 14px;
+      border-radius: 4px;
+      background: var(--ink);
+      color: var(--surface);
+    }
+    .skip-link:focus { top: 12px; }
+    main { width: min(1120px, calc(100vw - 48px)); margin: 0 auto; padding: 48px 0 72px; }
+    header { max-width: 940px; margin-bottom: 36px; }
+    h1, h2 {
+      margin: 0;
+      font-family: ui-serif, Georgia, Cambria, "Times New Roman", serif;
+      font-weight: 400;
+      letter-spacing: -0.025em;
+    }
+    h1 { max-width: 900px; font-size: clamp(2.25rem, 5vw, 3.5rem); line-height: 1.05; }
+    h2 { margin-bottom: 16px; font-size: clamp(1.75rem, 3vw, 2.15rem); line-height: 1.15; }
+    h3 { margin: 0 0 8px; font-size: 1.05rem; line-height: 1.3; }
+    p { margin: 0 0 16px; }
+    ul, ol { margin: 0; padding-left: 22px; }
+    li { margin: 6px 0; }
+    code {
+      padding: 0.08em 0.3em;
+      border-radius: 4px;
+      background: var(--code-bg);
+      color: var(--ink);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.9em;
+      overflow-wrap: anywhere;
+    }
+    .eyebrow {
+      margin: 0 0 8px;
+      color: var(--soft);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.74rem;
+      font-weight: 700;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+    }
+    .subtitle { max-width: 820px; margin-top: 18px; color: var(--muted); font-size: 1.05rem; }
+    .summary-grid {
+      display: grid;
+      grid-template-columns: 1.1fr 1fr 0.9fr;
+      gap: 16px;
+      margin: 32px 0 48px;
+    }
+    .card, .task, .decision {
+      border: 1px solid var(--rule);
+      border-radius: 7px;
+      background: var(--surface);
+    }
+    .card { padding: 20px; }
+    .card p, .card li { color: var(--muted); font-size: 0.91rem; }
+    .card-header { display: flex; align-items: center; gap: 9px; margin-bottom: 8px; }
+    .dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: var(--muted); }
+    .dot.accent { background: var(--accent); }
+    .dot.link { background: var(--link); }
+    .dot.ok { background: var(--ok); }
+    .section { margin-top: 48px; padding-top: 12px; border-top: 1px solid var(--rule); }
+    .section-intro { max-width: 850px; color: var(--muted); }
+    .callout {
+      margin: 22px 0;
+      padding: 20px;
+      border: 1px dashed rgba(217, 87, 38, 0.55);
+      border-left: 4px solid var(--accent);
+      border-radius: 6px;
+      background: var(--accent-tint);
+    }
+    .callout p { margin: 0; font-family: ui-serif, Georgia, Cambria, "Times New Roman", serif; font-size: 1.18rem; line-height: 1.4; }
+    .note { margin: 20px 0; padding: 16px 18px; border-left: 4px solid var(--link); background: var(--link-tint); color: var(--muted); }
+    .change-grid, .verify-grid, .decision-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 20px; }
+    .change { padding: 20px; border-top: 3px solid var(--rule-strong); }
+    .change.accent { border-top-color: var(--accent); }
+    .change.link { border-top-color: var(--link); }
+    .change p, .change li { color: var(--muted); font-size: 0.9rem; }
+    .diagram-shell { margin: 24px 0 18px; overflow-x: auto; }
+    .diagram-shell svg { display: block; width: 100%; min-width: 720px; height: auto; }
+    .figure-note { max-width: 860px; color: var(--muted); font-size: 0.88rem; }
+    .tasks { display: grid; gap: 18px; margin-top: 24px; }
+    .task { overflow: hidden; }
+    .task-head { display: flex; align-items: flex-start; gap: 14px; padding: 20px; border-bottom: 1px solid var(--rule); background: rgba(236, 236, 236, 0.55); }
+    .task-id {
+      display: inline-flex;
+      min-width: 42px;
+      justify-content: center;
+      padding: 5px 8px;
+      border: 1px solid var(--rule-strong);
+      border-radius: 4px;
+      color: var(--soft);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+    }
+    .task-head p { margin: 4px 0 0; color: var(--muted); font-size: 0.9rem; }
+    .task-body { padding: 20px; }
+    .task-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(260px, 0.65fr); gap: 24px; }
+    .task-body li, .task-body p { color: var(--muted); font-size: 0.9rem; }
+    .meta-list { margin: 0; }
+    .meta-list div { padding: 9px 0; border-bottom: 1px solid var(--rule); }
+    .meta-list div:last-child { border-bottom: 0; }
+    .meta-list dt {
+      color: var(--soft);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.7rem;
+      font-weight: 700;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+    }
+    .meta-list dd { margin: 3px 0 0; color: var(--muted); font-size: 0.86rem; }
+    .table-wrap { margin: 18px 0 26px; overflow-x: auto; border: 1px solid var(--rule); border-radius: 7px; background: var(--surface); }
+    table { width: 100%; min-width: 680px; border-collapse: collapse; }
+    caption { padding: 14px 16px 0; text-align: left; color: var(--muted); font-size: 0.82rem; }
+    th, td { padding: 13px 15px; border-bottom: 1px solid var(--rule); text-align: left; vertical-align: top; font-size: 0.88rem; }
+    th {
+      color: var(--soft);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+    tr:last-child td { border-bottom: 0; }
+    .decision { padding: 18px; }
+    .decision p { margin: 0; color: var(--muted); font-size: 0.9rem; }
+    .decision .choice { margin-bottom: 6px; color: var(--ink); font-weight: 750; }
+    footer { margin-top: 64px; padding-top: 18px; border-top: 1px solid var(--rule); color: var(--soft); font-size: 0.78rem; }
+
+    @media (max-width: 880px) {
+      main { width: min(100vw - 32px, 1120px); padding-top: 32px; }
+      .summary-grid, .change-grid, .verify-grid, .decision-grid, .task-grid { grid-template-columns: 1fr; }
+    }
+    @media print {
+      body { background: #fff; }
+      main { width: 100%; padding: 24px; }
+      .card, .task, .decision, .table-wrap { break-inside: avoid; }
+      .diagram-shell { overflow: visible; }
+    }
+  </style>
+</head>
+<body>
+<a class="skip-link" href="#content">Skip to plan content</a>
+<main id="content">
+  <header>
+    <p class="eyebrow">Implementation plan · [[Replace with project or subsystem]]</p>
+    <h1>[[Replace with a specific implementation-plan title]]</h1>
+    <p class="subtitle">[[Replace with the desired outcome and core implementation move in one concise paragraph.]]</p>
+    <div class="note" role="note">
+      <strong>Template guidance:</strong> Replace every double-bracket placeholder before review. Keep and adapt useful sections, remove optional or example content that does not apply, preserve this paper/ink/accent visual system, and remove this guidance note.
+    </div>
+  </header>
+
+  <section class="summary-grid" aria-label="Plan summary">
+    <article class="card">
+      <p class="eyebrow">Current constraint</p>
+      <div class="card-header"><span class="dot accent" aria-hidden="true"></span><h3>[[Replace with the problem]]</h3></div>
+      <p>[[Replace with evidence-based current behavior or constraint.]]</p>
+    </article>
+    <article class="card">
+      <p class="eyebrow">Core change</p>
+      <div class="card-header"><span class="dot link" aria-hidden="true"></span><h3>[[Replace with the recommended move]]</h3></div>
+      <p>[[Replace with the central behavior or architecture change.]]</p>
+    </article>
+    <article class="card">
+      <p class="eyebrow">Outcome</p>
+      <div class="card-header"><span class="dot ok" aria-hidden="true"></span><h3>[[Replace with the outcome]]</h3></div>
+      <p>[[Replace with the user-visible or engineering result.]]</p>
+    </article>
+  </section>
+
+  <section class="section" aria-labelledby="summary-heading">
+    <p class="eyebrow">Summary</p>
+    <h2 id="summary-heading">Summary</h2>
+    <p class="section-intro">[[Replace with the problem, desired outcome, repository evidence, and the recommended implementation approach.]]</p>
+    <div class="callout"><p>[[Replace with the decision-driving conclusion or design thesis.]]</p></div>
+  </section>
+
+  <section class="section" aria-labelledby="changes-heading">
+    <p class="eyebrow">Design and behavior</p>
+    <h2 id="changes-heading">Recommended changes</h2>
+    <p class="section-intro">[[Replace with how the proposed changes work together. Group details by subsystem or user-visible flow.]]</p>
+    <div class="change-grid">
+      <article class="card change accent">
+        <h3>[[Replace with change area]]</h3>
+        <ul>
+          <li>[[Replace with a concrete behavior, contract, or code change.]]</li>
+          <li>[[Replace with relevant ownership, reuse, or file/symbol evidence.]]</li>
+        </ul>
+      </article>
+      <article class="card change link">
+        <h3>[[Replace with change area]]</h3>
+        <ul>
+          <li>[[Replace with a concrete behavior, contract, or code change.]]</li>
+          <li>[[Replace with an important failure, rollout, or compatibility detail.]]</li>
+        </ul>
+      </article>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="diagram-heading">
+    <p class="eyebrow">Optional visual</p>
+    <h2 id="diagram-heading">[[Replace with diagram title, or remove this section]]</h2>
+    <p class="section-intro">[[Replace with why this diagram clarifies the plan. Remove this section when prose or a table is clearer.]]</p>
+    <figure>
+      <div class="diagram-shell">
+        <svg viewBox="0 0 960 300" role="img" aria-labelledby="plan-diagram-title plan-diagram-desc">
+          <title id="plan-diagram-title">[[Replace with an accessible diagram title]]</title>
+          <desc id="plan-diagram-desc">[[Replace with a concise description of the diagram's nodes, flow, and meaning.]]</desc>
+          <rect width="960" height="300" fill="#f5f5f5" />
+          <rect x="70" y="100" width="210" height="96" rx="7" fill="#ffffff" stroke="#2d3142" />
+          <text x="175" y="153" text-anchor="middle" fill="#2d3142" font-size="15" font-family="ui-sans-serif, system-ui, sans-serif">[[Replace: source]]</text>
+          <line x1="280" y1="148" x2="420" y2="148" stroke="#4f5d75" stroke-width="2" />
+          <path d="M420 148 L408 141 L408 155 Z" fill="#4f5d75" />
+          <rect x="420" y="100" width="210" height="96" rx="7" fill="rgba(217,87,38,0.09)" stroke="#d95726" />
+          <text x="525" y="153" text-anchor="middle" fill="#2d3142" font-size="15" font-family="ui-sans-serif, system-ui, sans-serif">[[Replace: change]]</text>
+          <line x1="630" y1="148" x2="770" y2="148" stroke="#4f5d75" stroke-width="2" />
+          <path d="M770 148 L758 141 L758 155 Z" fill="#4f5d75" />
+          <rect x="770" y="100" width="150" height="96" rx="7" fill="#ffffff" stroke="#2e5aa8" />
+          <text x="845" y="153" text-anchor="middle" fill="#2d3142" font-size="15" font-family="ui-sans-serif, system-ui, sans-serif">[[Replace: result]]</text>
+        </svg>
+      </div>
+      <figcaption class="figure-note">[[Replace with the diagram takeaway and any ordering or boundary details.]]</figcaption>
+    </figure>
+  </section>
+
+  <section class="section" aria-labelledby="tasks-heading">
+    <p class="eyebrow">Execution handoff</p>
+    <h2 id="tasks-heading">Implementation tasks</h2>
+    <p class="section-intro">[[Replace with the task-ordering strategy. Add or remove task cards according to real delivery and dependency boundaries.]]</p>
+    <div class="tasks">
+      <article class="task">
+        <div class="task-head">
+          <span class="task-id">T1</span>
+          <div>
+            <h3>[[Replace with task title]]</h3>
+            <p>[[Replace with the independently verifiable outcome.]]</p>
+          </div>
+        </div>
+        <div class="task-body">
+          <div class="task-grid">
+            <div>
+              <h3>Acceptance criteria</h3>
+              <ul>
+                <li>[[Replace with observable acceptance criterion.]]</li>
+                <li>[[Replace with focused verification evidence.]]</li>
+              </ul>
+            </div>
+            <dl class="meta-list">
+              <div><dt>Likely files</dt><dd>[[Replace with paths when useful.]]</dd></div>
+              <div><dt>Dependencies</dt><dd>[[Replace with task IDs or None.]]</dd></div>
+              <div><dt>Parallel safety</dt><dd>[[Replace with explicit safety or ordering.]]</dd></div>
+              <div><dt>Verification</dt><dd>[[Replace with command or scenario.]]</dd></div>
+              <div><dt>Relevant skills</dt><dd>[[Replace with actually available skills, or None.]]</dd></div>
+            </dl>
+          </div>
+        </div>
+      </article>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="verification-heading">
+    <p class="eyebrow">Proof</p>
+    <h2 id="verification-heading">Verification</h2>
+    <p class="section-intro">[[Replace with how automated and manual checks prove the intended outcome.]]</p>
+    <div class="verify-grid">
+      <article class="card">
+        <h3>Automated checks</h3>
+        <ul>
+          <li><code>[[Replace with focused test command]]</code></li>
+          <li><code>[[Replace with build, lint, or typecheck command]]</code></li>
+        </ul>
+      </article>
+      <article class="card">
+        <h3>Manual and integration scenarios</h3>
+        <ul>
+          <li>[[Replace with important end-to-end scenario.]]</li>
+          <li>[[Replace with failure, accessibility, rollout, or regression scenario.]]</li>
+        </ul>
+      </article>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="decisions-heading">
+    <p class="eyebrow">Resolved boundaries</p>
+    <h2 id="decisions-heading">Decisions and assumptions</h2>
+    <div class="table-wrap">
+      <table>
+        <caption>[[Replace with a concise description of settled choices and implementation-safe assumptions.]]</caption>
+        <thead>
+          <tr><th scope="col">Topic</th><th scope="col">Decision or assumption</th><th scope="col">Rationale</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>[[Replace with topic]]</td>
+            <td>[[Replace with settled choice or labeled assumption.]]</td>
+            <td>[[Replace with evidence or rationale.]]</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer>
+    <p>[[Replace with plan title]] · [[Replace with date or source context]]</p>
+  </footer>
+</main>
+</body>
+</html>

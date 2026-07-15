@@ -44,6 +44,10 @@ export class CbmClient {
     const binary = await resolveCbmBinary();
     const timeoutMs = options.timeoutMs ?? DEFAULT_QUERY_TIMEOUT_MS;
     const child = spawn(binary, ["cli", "--json", toolName, JSON.stringify(args)], {
+      env: {
+        ...process.env,
+        CBM_SQLITE_MMAP_SIZE: process.env.CBM_SQLITE_MMAP_SIZE ?? "0",
+      },
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
     });

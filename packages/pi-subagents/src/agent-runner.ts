@@ -185,8 +185,7 @@ export async function runAgent(
   if (agentConfig) {
     systemPrompt = buildAgentPrompt(agentConfig, effectiveCwd, env, parentSystemPrompt, extras);
   } else {
-    // Unknown type fallback: general-purpose (defensive — unreachable in practice
-    // since index.ts resolves unknown types to "general-purpose" before calling runAgent)
+    // Public spawn paths validate types; this remains defensive for direct internal callers.
     systemPrompt = buildAgentPrompt({
       name: type,
       description: "General-purpose agent",

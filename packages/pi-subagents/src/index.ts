@@ -7,17 +7,17 @@
  *   steer_subagent       — LLM-callable: send a steering message to a running agent
  *
  * Commands:
- *   /agents                 — Interactive agent management menu
+ *   /agents                 — Full-screen agent navigator (Alt+A)
  */
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { matchesKey, Text } from "@earendil-works/pi-tui";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { AgentManager } from "./agent-manager.js";
-import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
+import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, setDefaultMaxTurns, setGraceTurns } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getDefaultAgentNames, getUserAgentNames, registerAgents, resolveType } from "./agent-types.js";
 import { registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
@@ -42,6 +42,11 @@ import {
   SPINNER,
   type UICtx,
 } from "./ui/agent-widget.js";
+import {
+  AGENT_NAVIGATOR_SHORTCUT_LABEL,
+  openAgentNavigator,
+  registerAgentNavigatorControls,
+} from "./ui/agent-navigator.js";
 
 // ---- Shared helpers ----
 
@@ -436,7 +441,6 @@ export default function (pi: ExtensionAPI) {
 
   // --- Cross-extension RPC via pi.events ---
   let currentCtx: ExtensionContext | undefined;
-  let terminalInputUnsubscribe: (() => void) | undefined;
   let mainAbortCleanup: (() => void) | undefined;
   let mainAbortSignal: AbortSignal | undefined;
 
@@ -464,18 +468,7 @@ export default function (pi: ExtensionAPI) {
   // Capture ctx from session_start for RPC spawn handler
   pi.on("session_start", async (_event, ctx) => {
     currentCtx = ctx;
-    manager.clearCompleted();           // preserve existing behavior
-    terminalInputUnsubscribe?.();
-    terminalInputUnsubscribe = ctx.hasUI
-      ? ctx.ui.onTerminalInput((data) => {
-          if (!matchesKey(data, "escape")) return undefined;
-          const stopped = stopAllSubagents();
-          if (stopped > 0) {
-            ctx.ui.notify(`Stopped ${stopped} subagent${stopped === 1 ? "" : "s"}.`, "info");
-          }
-          return undefined;
-        })
-      : undefined;
+    manager.clearCompleted();
   });
 
   const { unsubPing: unsubPingRpc, unsubSpawn: unsubSpawnRpc, unsubStop: unsubStopRpc } = registerRpcHandlers({
@@ -491,8 +484,6 @@ export default function (pi: ExtensionAPI) {
   // On shutdown, abort all agents immediately and clean up.
   // If the session is going down, there's nothing left to consume agent results.
   pi.on("session_shutdown", async () => {
-    terminalInputUnsubscribe?.();
-    terminalInputUnsubscribe = undefined;
     clearMainAbortSignal();
     unsubSpawnRpc();
     unsubStopRpc();
@@ -506,7 +497,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   // Live widget: show running agents above editor
-  const widget = new AgentWidget(manager, agentActivity);
+  const widget = new AgentWidget(manager, agentActivity, AGENT_NAVIGATOR_SHORTCUT_LABEL);
 
   // ---- Join mode configuration ----
   let defaultJoinMode: JoinMode = 'smart';
@@ -930,8 +921,10 @@ Custom agents can be defined in .pi/agents/<name>.md (project) or ~/.pi/agent/ag
 
       const rawType = params.subagent_type as SubagentType;
       const resolved = resolveType(rawType);
-      const subagentType = resolved ?? "general-purpose";
-      const fellBack = resolved === undefined;
+      if (!resolved || !getAvailableTypes().includes(resolved)) {
+        return textResult(`Unknown or disabled agent type "${rawType}". Available types: ${getAvailableTypes().join(", ")}.`);
+      }
+      const subagentType = resolved;
 
       const displayName = getDisplayName(subagentType);
 
@@ -1153,19 +1146,15 @@ Custom agents can be defined in .pi/agents/<name>.md (project) or ~/.pi/agent/ag
 
       const details = buildDetails(detailBase, record, fgState, { tokens: tokenText });
 
-      const fallbackNote = fellBack
-        ? `Note: Unknown agent type "${rawType}" — using general-purpose.\n\n`
-        : "";
-
       if (record.status === "error") {
-        return textResult(`${fallbackNote}Agent failed: ${record.error}`, details);
+        return textResult(`Agent failed: ${record.error}`, details);
       }
 
       const durationMs = (record.completedAt ?? Date.now()) - record.startedAt;
       const statsParts = [`${record.toolUses} tool uses`];
       if (tokenText) statsParts.push(tokenText);
       return textResult(
-        `${fallbackNote}Agent completed in ${formatMs(durationMs)} (${statsParts.join(", ")})${getStatusNote(record.status)}.\n\n` +
+        `Agent completed in ${formatMs(durationMs)} (${statsParts.join(", ")})${getStatusNote(record.status)}.\n\n` +
         (record.result?.trim() || "No output."),
         details,
       );
@@ -1263,28 +1252,17 @@ Custom agents can be defined in .pi/agents/<name>.md (project) or ~/.pi/agent/ag
       }),
     }),
     execute: async (_toolCallId, params, _signal, _onUpdate, _ctx) => {
-      const record = manager.getRecord(params.agent_id);
-      if (!record) {
-        return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
+      const result = await manager.steer(params.agent_id, params.message);
+      if (result.status === "queued") {
+        pi.events.emit("subagents:steered", { id: params.agent_id, message: params.message });
+        return textResult(`Steering message queued for delivery to agent ${params.agent_id}.`);
       }
-      if (record.status !== "running") {
-        return textResult(`Agent "${params.agent_id}" is not running (status: ${record.status}). Cannot steer a non-running agent.`);
+      if (result.status === "sent") {
+        pi.events.emit("subagents:steered", { id: params.agent_id, message: params.message });
+        return textResult(`Steering message sent to agent ${params.agent_id}. The agent will process it after its current tool execution.`);
       }
-      if (!record.session) {
-        // Session not ready yet — queue the steer for delivery once initialized
-        if (!record.pendingSteers) record.pendingSteers = [];
-        record.pendingSteers.push(params.message);
-        pi.events.emit("subagents:steered", { id: record.id, message: params.message });
-        return textResult(`Steering message queued for agent ${record.id}. It will be delivered once the session initializes.`);
-      }
-
-      try {
-        await steerAgent(record.session, params.message);
-        pi.events.emit("subagents:steered", { id: record.id, message: params.message });
-        return textResult(`Steering message sent to agent ${record.id}. The agent will process it after its current tool execution.`);
-      } catch (err) {
-        return textResult(`Failed to steer agent: ${err instanceof Error ? err.message : String(err)}`);
-      }
+      if (result.status === "rejected") return textResult(result.reason);
+      return textResult(`Failed to steer agent: ${result.error}`);
     },
   });
 
@@ -1314,158 +1292,84 @@ Custom agents can be defined in .pi/agents/<name>.md (project) or ~/.pi/agent/ag
     return getModelLabelFromConfig(cfg.model);
   }
 
-  async function showAgentsMenu(ctx: ExtensionCommandContext) {
-    reloadCustomAgents();
-    const allNames = getAllTypes();
+  async function showAgentManagementMenu(ctx: ExtensionContext) {
+    while (true) {
+      reloadCustomAgents();
+      const allNames = getAllTypes();
+      const options = [
+        ...(allNames.length > 0 ? [`Agent types (${allNames.length})`] : []),
+        "Create new agent",
+        "Settings",
+        "Back",
+      ];
 
-    // Build select options
-    const options: string[] = [];
+      if (allNames.length === 0) {
+        ctx.ui.notify(
+          "No agent types found. Create a specialized agent with its own context, prompt, and tools.",
+          "info",
+        );
+      }
 
-    // Running agents entry (only if there are active agents)
-    const agents = manager.listAgents();
-    if (agents.length > 0) {
-      const running = agents.filter(a => a.status === "running" || a.status === "queued").length;
-      const done = agents.filter(a => a.status === "completed" || a.status === "steered").length;
-      options.push(`Running agents (${agents.length}) — ${running} running, ${done} done`);
-    }
-
-    // Agent types list
-    if (allNames.length > 0) {
-      options.push(`Agent types (${allNames.length})`);
-    }
-
-    // Actions
-    options.push("Create new agent");
-    options.push("Settings");
-
-    const noAgentsMsg = allNames.length === 0 && agents.length === 0
-      ? "No agents found. Create specialized subagents that can be delegated to.\n\n" +
-        "Each subagent has its own context window, custom system prompt, and specific tools.\n\n" +
-        "Try creating: Code Reviewer, Security Auditor, Test Writer, or Documentation Writer.\n\n"
-      : "";
-
-    if (noAgentsMsg) {
-      ctx.ui.notify(noAgentsMsg, "info");
-    }
-
-    const choice = await ctx.ui.select("Agents", options);
-    if (!choice) return;
-
-    if (choice.startsWith("Running agents (")) {
-      await showRunningAgents(ctx);
-      await showAgentsMenu(ctx);
-    } else if (choice.startsWith("Agent types (")) {
-      await showAllAgentsList(ctx);
-      await showAgentsMenu(ctx);
-    } else if (choice === "Create new agent") {
-      await showCreateWizard(ctx);
-    } else if (choice === "Settings") {
-      await showSettings(ctx);
-      await showAgentsMenu(ctx);
+      const choice = await ctx.ui.select("Manage agents", options);
+      if (!choice || choice === "Back") return;
+      if (choice.startsWith("Agent types (")) await showAllAgentsList(ctx);
+      else if (choice === "Create new agent") await showCreateWizard(ctx);
+      else if (choice === "Settings") await showSettings(ctx);
     }
   }
 
-  async function showAllAgentsList(ctx: ExtensionCommandContext) {
-    const allNames = getAllTypes();
-    if (allNames.length === 0) {
-      ctx.ui.notify("No agents.", "info");
-      return;
-    }
+  async function showAllAgentsList(ctx: ExtensionContext) {
+    while (true) {
+      const allNames = getAllTypes();
+      if (allNames.length === 0) {
+        ctx.ui.notify("No agents.", "info");
+        return;
+      }
 
-    // Source indicators: defaults unmarked, custom agents get • (project) or ◦ (global)
-    // Disabled agents get ✕ prefix
-    const sourceIndicator = (cfg: AgentConfig | undefined) => {
-      const disabled = cfg?.enabled === false;
-      if (cfg?.source === "project") return disabled ? "✕• " : "•  ";
-      if (cfg?.source === "global") return disabled ? "✕◦ " : "◦  ";
-      if (disabled) return "✕  ";
-      return "   ";
-    };
+      // Source indicators: defaults unmarked, custom agents get • (project) or ◦ (global)
+      // Disabled agents get ✕ prefix
+      const sourceIndicator = (cfg: AgentConfig | undefined) => {
+        const disabled = cfg?.enabled === false;
+        if (cfg?.source === "project") return disabled ? "✕• " : "•  ";
+        if (cfg?.source === "global") return disabled ? "✕◦ " : "◦  ";
+        if (disabled) return "✕  ";
+        return "   ";
+      };
 
-    const entries = allNames.map(name => {
-      const cfg = getAgentConfig(name);
-      const disabled = cfg?.enabled === false;
-      const model = getModelLabel(name, ctx.modelRegistry);
-      const indicator = sourceIndicator(cfg);
-      const prefix = `${indicator}${name} · ${model}`;
-      const desc = disabled ? "(disabled)" : (cfg?.description ?? name);
-      return { name, prefix, desc };
-    });
-    const maxPrefix = Math.max(...entries.map(e => e.prefix.length));
+      const entries = allNames.map(name => {
+        const cfg = getAgentConfig(name);
+        const disabled = cfg?.enabled === false;
+        const model = getModelLabel(name, ctx.modelRegistry);
+        const indicator = sourceIndicator(cfg);
+        const prefix = `${indicator}${name} · ${model}`;
+        const desc = disabled ? "(disabled)" : (cfg?.description ?? name);
+        return { name, prefix, desc };
+      });
+      const maxPrefix = Math.max(...entries.map(e => e.prefix.length));
 
-    const hasCustom = allNames.some(n => { const c = getAgentConfig(n); return c && !c.isDefault && c.enabled !== false; });
-    const hasDisabled = allNames.some(n => getAgentConfig(n)?.enabled === false);
-    const legendParts: string[] = [];
-    if (hasCustom) legendParts.push("• = project  ◦ = global");
-    if (hasDisabled) legendParts.push("✕ = disabled");
-    const legend = legendParts.length ? "\n" + legendParts.join("  ") : "";
+      const hasCustom = allNames.some(n => { const c = getAgentConfig(n); return c && !c.isDefault && c.enabled !== false; });
+      const hasDisabled = allNames.some(n => getAgentConfig(n)?.enabled === false);
+      const legendParts: string[] = [];
+      if (hasCustom) legendParts.push("• = project  ◦ = global");
+      if (hasDisabled) legendParts.push("✕ = disabled");
+      const legend = legendParts.length ? "\n" + legendParts.join("  ") : "";
 
-    const options = entries.map(({ prefix, desc }) =>
-      `${prefix.padEnd(maxPrefix)} — ${desc}`,
-    );
-    if (legend) options.push(legend);
+      const options = entries.map(({ prefix, desc }) =>
+        `${prefix.padEnd(maxPrefix)} — ${desc}`,
+      );
+      if (legend) options.push(legend);
+      options.push("Back");
 
-    const choice = await ctx.ui.select("Agent types", options);
-    if (!choice) return;
+      const choice = await ctx.ui.select("Agent types", options);
+      if (!choice || choice === "Back") return;
+      if (choice === legend) continue;
 
-    const agentName = choice.split(" · ")[0].replace(/^[•◦✕\s]+/, "").trim();
-    if (getAgentConfig(agentName)) {
-      await showAgentDetail(ctx, agentName);
-      await showAllAgentsList(ctx);
+      const agentName = choice.split(" · ")[0].replace(/^[•◦✕\s]+/, "").trim();
+      if (getAgentConfig(agentName)) await showAgentDetail(ctx, agentName);
     }
   }
 
-  async function showRunningAgents(ctx: ExtensionCommandContext) {
-    const agents = manager.listAgents();
-    if (agents.length === 0) {
-      ctx.ui.notify("No agents.", "info");
-      return;
-    }
-
-    const options = agents.map(a => {
-      const dn = getDisplayName(a.type);
-      const dur = formatDuration(a.startedAt, a.completedAt);
-      return `${dn} (${a.description}) · ${a.toolUses} tools · ${a.status} · ${dur}`;
-    });
-
-    const choice = await ctx.ui.select("Running agents", options);
-    if (!choice) return;
-
-    // Find the selected agent by matching the option index
-    const idx = options.indexOf(choice);
-    if (idx < 0) return;
-    const record = agents[idx];
-
-    await viewAgentConversation(ctx, record);
-    // Back-navigation: re-show the list
-    await showRunningAgents(ctx);
-  }
-
-  async function viewAgentConversation(ctx: ExtensionCommandContext, record: AgentRecord) {
-    if (!record.session) {
-      ctx.ui.notify(`Agent is ${record.status === "queued" ? "queued" : "expired"} — no session available.`, "info");
-      return;
-    }
-
-    const { ConversationViewer } = await import("./ui/conversation-viewer.js");
-    const session = record.session;
-    const activity = agentActivity.get(record.id);
-
-    await ctx.ui.custom<undefined>(
-      (tui, theme, _keybindings, done) => {
-        return new ConversationViewer(tui, session, record, activity, theme, done, {
-          stopAgent: stopSubagent,
-          stopAll: stopAllSubagents,
-        });
-      },
-      {
-        overlay: true,
-        overlayOptions: { anchor: "center", width: "90%" },
-      },
-    );
-  }
-
-  async function showAgentDetail(ctx: ExtensionCommandContext, name: string) {
+  async function showAgentDetail(ctx: ExtensionContext, name: string) {
     const cfg = getAgentConfig(name);
     if (!cfg) {
       ctx.ui.notify(`Agent config not found for "${name}".`, "warning");
@@ -1531,7 +1435,7 @@ Custom agents can be defined in .pi/agents/<name>.md (project) or ~/.pi/agent/ag
   }
 
   /** Eject a default agent: write its embedded config as a .md file. */
-  async function ejectAgent(ctx: ExtensionCommandContext, name: string, cfg: AgentConfig) {
+  async function ejectAgent(ctx: ExtensionContext, name: string, cfg: AgentConfig) {
     const location = await ctx.ui.select("Choose location", [
       "Project (.pi/agents/)",
       "Personal (~/.pi/agent/agents/)",
@@ -1576,7 +1480,7 @@ Custom agents can be defined in .pi/agents/<name>.md (project) or ~/.pi/agent/ag
   }
 
   /** Disable an agent: set enabled: false in its .md file, or create a stub for built-in defaults. */
-  async function disableAgent(ctx: ExtensionCommandContext, name: string) {
+  async function disableAgent(ctx: ExtensionContext, name: string) {
     const file = findAgentFile(name);
     if (file) {
       // Existing file — set enabled: false in frontmatter (idempotent)
@@ -1611,7 +1515,7 @@ Custom agents can be defined in .pi/agents/<name>.md (project) or ~/.pi/agent/ag
   }
 
   /** Enable a disabled agent by removing enabled: false from its frontmatter. */
-  async function enableAgent(ctx: ExtensionCommandContext, name: string) {
+  async function enableAgent(ctx: ExtensionContext, name: string) {
     const file = findAgentFile(name);
     if (!file) return;
 
@@ -1631,7 +1535,7 @@ Custom agents can be defined in .pi/agents/<name>.md (project) or ~/.pi/agent/ag
     }
   }
 
-  async function showCreateWizard(ctx: ExtensionCommandContext) {
+  async function showCreateWizard(ctx: ExtensionContext) {
     const location = await ctx.ui.select("Choose location", [
       "Project (.pi/agents/)",
       "Personal (~/.pi/agent/agents/)",
@@ -1653,7 +1557,7 @@ Custom agents can be defined in .pi/agents/<name>.md (project) or ~/.pi/agent/ag
     }
   }
 
-  async function showGenerateWizard(ctx: ExtensionCommandContext, targetDir: string) {
+  async function showGenerateWizard(ctx: ExtensionContext, targetDir: string) {
     const description = await ctx.ui.input("Describe what this agent should do");
     if (!description) return;
 
@@ -1727,7 +1631,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
     }
   }
 
-  async function showManualWizard(ctx: ExtensionCommandContext, targetDir: string) {
+  async function showManualWizard(ctx: ExtensionContext, targetDir: string) {
     // 1. Name
     const name = await ctx.ui.input("Agent name (filename, no spaces)");
     if (!name) return;
@@ -1815,7 +1719,7 @@ ${systemPrompt}
     ctx.ui.notify(`Created ${targetPath}`, "info");
   }
 
-  async function showSettings(ctx: ExtensionCommandContext) {
+  async function showSettings(ctx: ExtensionContext) {
     const choice = await ctx.ui.select("Settings", [
       `Max concurrency (current: ${manager.getMaxConcurrent()})`,
       `Default max turns (current: ${getDefaultMaxTurns() ?? "unlimited"})`,
@@ -1874,8 +1778,19 @@ ${systemPrompt}
     }
   }
 
-  pi.registerCommand("agents", {
-    description: "Manage agents",
-    handler: async (_args, ctx) => { await showAgentsMenu(ctx); },
-  });
+  const showNavigator = async (ctx: ExtensionContext) => {
+    reloadCustomAgents();
+    await openAgentNavigator(ctx, {
+      manager,
+      activity: agentActivity,
+      actions: {
+        stopAgent: stopSubagent,
+        steerAgent: (id, message) => manager.steer(id, message),
+        onSteered: (id, message) => pi.events.emit("subagents:steered", { id, message }),
+      },
+      manage: showAgentManagementMenu,
+    });
+  };
+
+  registerAgentNavigatorControls(pi, showNavigator);
 }

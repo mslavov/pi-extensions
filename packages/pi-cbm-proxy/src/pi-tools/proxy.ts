@@ -150,38 +150,51 @@ async function callCommand(
   }
 }
 
-export const cbmProxyToolDefinition: ToolDefinition = {
-  name: "cbm",
-  label: "CBM Proxy",
-  description: "Proxy to codebase-memory commands without exposing every upstream command as a separate Pi tool.",
-  promptSnippet: "Call codebase-memory commands through one compact proxy: list, describe, or call a command with JSON args",
-  promptGuidelines: [
-    "Use cbm for codebase-memory graph commands that are not exposed as direct helper tools.",
-    "Use cbm action='list' to see available commands and action='describe' before calling an unfamiliar command.",
-    "For cbm action='call', pass args as a JSON object string, for example args: '{\"query\":\"auth\",\"limit\":8}'.",
-    "Prefer direct read_symbol and search_and_read_symbols for symbol source workflows; use cbm for graph search, traces, architecture, schema, exact text search, Cypher, and change impact.",
-  ],
-  parameters: Type.Object({
-    action: Type.Optional(StringEnum(["list", "describe", "call"] as const, { default: "call" })),
-    command: Type.Optional(StringEnum(PROXY_COMMANDS, { description: "codebase-memory command to describe or call." })),
-    args: Type.Optional(Type.String({ description: "JSON object string passed as command arguments. Omit or use '{}' for no args." })),
-  }),
-  async execute(params, services, ctx) {
-    const action = typeof params.action === "string" ? params.action : params.command ? "call" : "list";
+export function createCbmProxyToolDefinition(): ToolDefinition {
+  const describedCommands = new Set<ProxyCommand>();
 
-    if (action === "list") {
-      return buildToolTextResult("codebase-memory commands", listCommands(), { tool: "cbm", action });
-    }
+  return {
+    name: "cbm",
+    label: "CBM Proxy",
+    description: "Proxy to codebase-memory commands without exposing every upstream command as a separate Pi tool.",
+    promptSnippet: "Call codebase-memory commands through one compact proxy: list, describe, or call a command with JSON args",
+    promptGuidelines: [
+      "Use cbm for codebase-memory graph commands that are not exposed as direct helper tools.",
+      "Use cbm action='list' to see available commands and action='describe' before calling an unfamiliar command.",
+      "For cbm action='call', pass args as a JSON object string, for example args: '{\"query\":\"auth\",\"limit\":8}'.",
+      "Prefer direct read_symbol and search_and_read_symbols for symbol source workflows; use cbm for graph search, traces, architecture, schema, exact text search, Cypher, and change impact.",
+    ],
+    parameters: Type.Object({
+      action: Type.Optional(StringEnum(["list", "describe", "call"] as const, { default: "call" })),
+      command: Type.Optional(StringEnum(PROXY_COMMANDS, { description: "codebase-memory command to describe or call." })),
+      args: Type.Optional(Type.String({ description: "JSON object string passed as command arguments. Omit or use '{}' for no args." })),
+    }),
+    async execute(params, services, ctx) {
+      const action = typeof params.action === "string" ? params.action : params.command ? "call" : "list";
 
-    const command = requireCommand(params.command);
-    if (action === "describe") {
-      return buildToolTextResult("codebase-memory command", describeCommand(command), { tool: "cbm", action, command });
-    }
+      if (action === "list") {
+        return buildToolTextResult("codebase-memory commands", listCommands(), { tool: "cbm", action });
+      }
 
-    if (action !== "call") throw new Error("cbm action must be list, describe, or call.");
-    return callCommand(command, parseArgs(params.args), services, ctx);
-  },
-  renderCall: renderCall("cbm", (args) => `${String(args.action ?? "call")} ${String(args.command ?? "")}`.trim()),
-  renderResult: renderResult("cbm"),
-};
+      const command = requireCommand(params.command);
+      if (action === "describe") {
+        describedCommands.add(command);
+        return buildToolTextResult("codebase-memory command", describeCommand(command), { tool: "cbm", action, command });
+      }
 
+      if (action !== "call") throw new Error("cbm action must be list, describe, or call.");
+
+      try {
+        return await callCommand(command, parseArgs(params.args), services, ctx);
+      } catch (error) {
+        if (describedCommands.has(command)) throw error;
+        describedCommands.add(command);
+
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`${message}\n\nCommand description:\n${JSON.stringify(describeCommand(command), null, 2)}`);
+      }
+    },
+    renderCall: renderCall("cbm", (args) => `${String(args.action ?? "call")} ${String(args.command ?? "")}`.trim()),
+    renderResult: renderResult("cbm"),
+  };
+}
