@@ -1,0 +1,24 @@
+{
+  "name": "pi-prewalk",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Same-session strong-planner to Luna implementation handoff for Pi",
+  "keywords": ["pi-package", "pi-extension"],
+  "license": "MIT",
+  "pi": {
+    "extensions": ["./src/index.ts"]
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "vitest run src/__tests__",
+    "build": "echo 'pi compiles TypeScript directly'",
+    "clean": "echo 'nothing to clean'"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-agent-core": "^0.80.10",
+    "@earendil-works/pi-coding-agent": "^0.80.10"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.80.10"
+  }
+}
