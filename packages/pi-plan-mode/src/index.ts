@@ -14,9 +14,8 @@
  *   /plan-exit           Exit plan mode without using UI
  *   Ctrl+Alt+P           Toggle plan mode
  *
- * Tools (model-initiated):
- *   enter_plan_mode      Model can enter plan mode for complex tasks
- *   exit_plan_mode       Model exits plan mode, presents plan for approval
+ * Tool (model-initiated after /plan):
+ *   exit_plan_mode       Model presents the completed plan for approval
  */
 
 import { spawn } from "node:child_process";
@@ -616,12 +615,6 @@ Coordinate execution from the main agent:
 		return /(?:^|[;&|({}\s])bd\s+(?:init|create|new|q|update|close|done|link|dep|delete|reopen|assign|priority|tag|label|note|comment|edit|set-state|todo\s+(?:add|create|update|close|done|delete))\b/.test(command);
 	}
 
-	function planWorkflowReminder(): string {
-		return hasAgentTool
-			? `Ground the plan in repository evidence, use cheap ${EXPLORE_AGENT} agents for search, reserve model=${PLANNING_AGENT_MODEL}, thinking=${PLANNING_AGENT_THINKING} for plan synthesis or review, and call exit_plan_mode only when the HTML plan is decision-complete.`
-			: "Ground the plan in repository evidence, resolve material decisions, write the adaptive standalone HTML plan, and call exit_plan_mode only when it is decision-complete.";
-	}
-
 	function buildReviewFeedbackInstructions(): string {
 		return "If the user submits annotated plan review feedback, revise the same HTML plan file directly, address each quoted comment or global note, and call exit_plan_mode again when the updated plan is ready for review.";
 	}
@@ -710,37 +703,7 @@ Before approval, confirm that the plan matches the user's intent, every claim is
 Call exit_plan_mode only when the artifact is decision-complete. Do not print the tool name as prose and do not ask “Should I proceed?”`;
 	}
 
-	// ---- Tools (model-initiated plan mode control) ----
-
-	pi.registerTool({
-		name: "enter_plan_mode",
-		label: "Enter Plan Mode",
-		description: `Enter plan mode for structured planning before implementation. Use this proactively when about to start a non-trivial implementation task. Getting user sign-off on your approach before writing code prevents wasted effort.
-
-Use when ANY of these apply:
-- The task is complex and spans multiple files or components
-- Multiple valid approaches exist (e.g., Redis vs in-memory caching)
-- The task involves architectural decisions or new subsystems
-- Requirements are unclear and you need to explore before understanding scope
-- User preferences matter and the implementation could go multiple ways
-- You would use ask_user to clarify the approach — use enter_plan_mode instead
-
-Do NOT use for:
-- Single-line or few-line fixes (typos, obvious bugs)
-- Tasks where the user gave very specific, detailed instructions
-- Pure research/exploration tasks (use the Agent tool with Explore type instead)
-
-Plan mode keeps all registered tools available while restricting direct write/edit tool calls to the HTML plan file. Planning depth, sections, diagrams, and delegation should scale to the task. Prefer cheap low-effort Explore agents for detailed repository evidence; use a high-effort Plan agent to synthesize and write the HTML artifact.`,
-		parameters: Type.Object({}),
-		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
-			if (planModeEnabled) {
-				return { content: [{ type: "text" as const, text: "Already in plan mode." }], details: undefined };
-			}
-			detectAvailableTools();
-			enablePlanMode(ctx);
-			return { content: [{ type: "text" as const, text: `Plan mode enabled. HTML plan file: ${planFilePath}\n\nYou are now in planning mode. Direct write/edit tool calls are limited to the HTML plan file. ${planWorkflowReminder()} Call the exit_plan_mode tool when the plan is ready for approval.` }], details: undefined };
-		},
-	});
+	// ---- Tool (available only to finish user-initiated plan mode) ----
 
 	pi.registerTool({
 		name: "exit_plan_mode",

@@ -1,0 +1,21 @@
+version: 1
+id: deterministic-summary
+inputs:
+  target:
+    type: string
+    required: true
+steps:
+  - id: settings
+    type: set
+    values:
+      format: json
+  - id: inspect
+    type: run
+    command: tool
+    args:
+      - inspect
+      - "${{ inputs.target }}"
+      - "--format=${{ vars.format }}"
+outputs:
+  status: "${{ steps.inspect.status }}"
+  stdout: "${{ steps.inspect.output.stdout }}"

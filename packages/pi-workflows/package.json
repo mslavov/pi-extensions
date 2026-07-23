@@ -1,0 +1,55 @@
+{
+  "name": "pi-workflows",
+  "version": "0.1.0",
+  "description": "Workflow engine extension for pi",
+  "type": "module",
+  "license": "MIT",
+  "author": "Milko Slavov <milko.slavov@gmail.com>",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "workflow"
+  ],
+  "files": [
+    "README.md",
+    "LICENSE",
+    "src",
+    "dist",
+    "skills",
+    "examples"
+  ],
+  "bin": {
+    "pi-workflows": "./dist/cli.js"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "build": "npm run clean && tsc -p tsconfig.build.json && node -e \"require('node:fs').chmodSync('dist/cli.js', 0o755)\"",
+    "test": "vitest run --exclude test/integration/** --exclude test/pack/**",
+    "test:integration": "vitest run test/agent test/cli test/extension test/process test/rpc",
+    "test:pack": "vitest run test/pack",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "^0.74.0",
+    "typebox": "^1.1.24",
+    "yaml": "^2.8.2"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.74.0",
+    "@types/node": "^24.3.0",
+    "typescript": "^6.0.2",
+    "vitest": "^4.1.5"
+  },
+  "engines": {
+    "node": ">=20.6.0"
+  }
+}

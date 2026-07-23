@@ -1,0 +1,13 @@
+version: 1
+id: nested-child
+inputs:
+  label:
+    type: string
+    required: true
+steps:
+  - id: value
+    type: set
+    values:
+      result: "child:${{ inputs.label }}"
+outputs:
+  value: "${{ vars.result }}"

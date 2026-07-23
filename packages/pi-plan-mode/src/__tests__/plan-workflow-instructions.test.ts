@@ -6,6 +6,12 @@ import { describe, expect, it } from "vitest";
 const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../index.ts"), "utf-8");
 
 describe("plan-mode workflow instructions", () => {
+  it("starts plan mode only through the user command", () => {
+    expect(source).toContain('pi.registerCommand("plan"');
+    expect(source).not.toContain('name: "enter_plan_mode"');
+    expect(source).toContain('name: "exit_plan_mode"');
+  });
+
   it("uses strict workflow invariants with adaptive plan content", () => {
     expect(source).toContain("Ground in Evidence");
     expect(source).toContain("Resolve Material Decisions");

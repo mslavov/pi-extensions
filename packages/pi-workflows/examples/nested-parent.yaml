@@ -1,0 +1,19 @@
+version: 1
+id: nested-parent
+name: Nested workflow example
+inputs:
+  label:
+    type: string
+    default: nested
+steps:
+  - id: approve
+    type: approval
+    message: Run the nested deterministic child?
+  - id: child
+    type: workflow
+    workflow: nested-child
+    inputs:
+      label: "${{ inputs.label }}"
+outputs:
+  decision: "${{ steps.approve.output.decision }}"
+  child: "${{ steps.child.output.value }}"

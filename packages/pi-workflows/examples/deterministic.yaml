@@ -1,0 +1,33 @@
+version: 1
+id: deterministic-example
+name: Deterministic example
+description: Compose typed input, variables, argv execution, shell syntax, and a script.
+inputs:
+  subject:
+    type: string
+    description: Value included in the final summary.
+    required: true
+steps:
+  - id: configure
+    type: set
+    values:
+      prefix: workflow
+  - id: argv
+    type: run
+    command: node
+    args:
+      - -e
+      - process.stdout.write(process.argv[1])
+      - "${{ vars.prefix }}:${{ inputs.subject }}"
+  - id: shell
+    type: shell
+    command: echo shell-ok
+  - id: script
+    type: script
+    interpreter: node
+    file: examples/scripts/summarize.mjs
+    args:
+      - "${{ steps.argv.output.stdout }}"
+outputs:
+  summary: "${{ steps.script.output.stdout }}"
+  shellStatus: "${{ steps.shell.status }}"

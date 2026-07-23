@@ -18,6 +18,7 @@ Remote: `git@github.com:mslavov/pi-extensions.git`
 | [pi-powerline](packages/pi-powerline/) | Configurable Powerline-style footer for pi |
 | [pi-prompt-history](packages/pi-prompt-history/) | Ctrl+R prompt history picker across projects, project, or session |
 | [pi-progressive-context](packages/pi-progressive-context/) | Lazy nested AGENTS.md / CLAUDE.md context loading for pi |
+| [pi-workflows](packages/pi-workflows/) | Strict YAML workflows for interactive pi, RPC clients, and a standalone Node CLI |
 | [pi-subagents](packages/pi-subagents/) | Patched fork of `@tintinweb/pi-subagents` for autonomous sub-agents in pi |
 | [pi-beads](packages/pi-beads/) | Display current-project Beads task status in the TUI |
 | [pi-casper](packages/pi-casper/) | Slack Socket Mode bridge that maps local pi sessions to Slack channels |
@@ -63,10 +64,13 @@ Or add local packages to `~/.pi/agent/settings.json`:
     "../../workspace/pi-extensions/packages/pi-prompt-history",
     "../../workspace/pi-extensions/packages/pi-markitdown",
     "../../workspace/pi-extensions/packages/pi-autocomplete",
-    "../../workspace/pi-extensions/packages/pi-progressive-context"
+    "../../workspace/pi-extensions/packages/pi-progressive-context",
+    "../../workspace/pi-extensions/packages/pi-workflows"
   ]
 }
 ```
+
+See [`packages/pi-workflows/README.md`](packages/pi-workflows/README.md) for its Node CLI setup, workflow directories, YAML contract, and security boundaries.
 
 ## Publishing
 
