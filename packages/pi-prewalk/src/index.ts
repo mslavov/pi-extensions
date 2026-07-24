@@ -4,6 +4,8 @@ import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
+	BEADS_PLANNING_INSTRUCTION,
+	BEADS_VERIFICATION_INSTRUCTION,
 	CONTINUATION_MESSAGE_TYPE,
 	CONTROL_MESSAGE_PREFIX,
 	IMPLEMENTATION_MESSAGE_TYPE,
@@ -57,6 +59,7 @@ export default function piPrewalkExtension(pi: ExtensionAPI): void {
 	let state: PrewalkState = { phase: "idle" };
 	let plannerSnapshot: PlannerSnapshot | undefined;
 	let expectedModelKey: string | undefined;
+	let useBeads = false;
 
 	function notify(ctx: ExtensionContext, message: string, type: NotificationType = "info"): void {
 		if (ctx.hasUI) {
@@ -96,6 +99,7 @@ export default function piPrewalkExtension(pi: ExtensionAPI): void {
 		state = { phase: "idle" };
 		plannerSnapshot = undefined;
 		expectedModelKey = undefined;
+		useBeads = false;
 		updateStatus(ctx);
 	}
 
@@ -104,7 +108,7 @@ export default function piPrewalkExtension(pi: ExtensionAPI): void {
 		notify(ctx, message, "error");
 	}
 
-	function arm(ctx: ExtensionContext): boolean {
+	async function arm(ctx: ExtensionContext): Promise<boolean> {
 		publishConfigWarning(ctx);
 		if (state.phase !== "idle") {
 			notify(ctx, `Prewalk is already ${state.phase}. Use /prewalk off before starting another run.`, "warning");
@@ -115,7 +119,8 @@ export default function piPrewalkExtension(pi: ExtensionAPI): void {
 			return false;
 		}
 
-		const validation = validateArmingTools(pi.getActiveTools());
+		useBeads = await hasBeadsWorkspace(pi, ctx.cwd);
+		const validation = validateArmingTools(pi.getActiveTools(), useBeads);
 		if (!validation.ok) {
 			notify(ctx, validation.reason, "error");
 			return false;
@@ -123,7 +128,8 @@ export default function piPrewalkExtension(pi: ExtensionAPI): void {
 
 		state = { phase: "armed" };
 		updateStatus(ctx);
-		notify(ctx, `Prewalk armed. The next task will plan, make one mutation, then hand off to ${targetModel.key}.`);
+		const tracking = useBeads ? "Beads" : "todo_write";
+		notify(ctx, `Prewalk armed with ${tracking}. The next task will plan, make one mutation, then hand off to ${targetModel.key}.`);
 		return true;
 	}
 
@@ -244,7 +250,7 @@ export default function piPrewalkExtension(pi: ExtensionAPI): void {
 				await turnOff(ctx);
 				return;
 			}
-			if (!arm(ctx)) return;
+			if (!(await arm(ctx))) return;
 			if (!command) return;
 
 			if (!ctx.hasUI) {
@@ -276,7 +282,7 @@ export default function piPrewalkExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("context", (event) => {
-		return { messages: buildContextMessages(event.messages, state.phase) };
+		return { messages: buildContextMessages(event.messages, state.phase, useBeads) };
 	});
 
 	pi.on("turn_start", (_event, _ctx) => {
@@ -287,14 +293,18 @@ export default function piPrewalkExtension(pi: ExtensionAPI): void {
 	pi.on("tool_call", (event) => {
 		if (state.phase !== "planning" || !state.run) return;
 
-		if (event.toolName === "todo_write") {
+		if (!useBeads && event.toolName === "todo_write") {
 			const validation = validateTodoWriteInput(event.input);
 			if (!validation.ok) return { block: true, reason: validation.reason };
 		}
 
 		state = {
 			phase: "planning",
-			run: recordToolCall(state.run, { toolCallId: event.toolCallId, toolName: event.toolName }),
+			run: recordToolCall(
+				state.run,
+				{ toolCallId: event.toolCallId, toolName: event.toolName, input: event.input },
+				useBeads,
+			),
 		};
 	});
 
@@ -337,7 +347,11 @@ export default function piPrewalkExtension(pi: ExtensionAPI): void {
 		notify(ctx, `Prewalk cancelled after the model changed to ${selectedModelKey}.`, "warning");
 	});
 
-	const handleAgentSettled = async (_event: { type: "agent_settled" }, ctx: ExtensionContext): Promise<void> => {
+	const onAgentSettled = pi.on as unknown as (
+		event: "agent_settled",
+		handler: (event: { type: "agent_settled" }, ctx: ExtensionContext) => void | Promise<void>,
+	) => void;
+	onAgentSettled("agent_settled", async (_event, ctx) => {
 		if (state.phase === "implementing" || state.phase === "handoff") {
 			if (config.restorePlanner && plannerSnapshot) {
 				const snapshot = plannerSnapshot;
@@ -353,9 +367,7 @@ export default function piPrewalkExtension(pi: ExtensionAPI): void {
 			clearAutomation(ctx);
 			notify(ctx, "Prewalk ended before a qualifying first mutation.", "warning");
 		}
-	};
-
-	pi.on("agent_settled", handleAgentSettled);
+	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
 		const targetIsActive = state.phase === "handoff" || state.phase === "implementing" || state.phase === "restoring";
@@ -367,15 +379,18 @@ export default function piPrewalkExtension(pi: ExtensionAPI): void {
 	});
 }
 
-function buildContextMessages(messages: AgentMessage[], phase: PrewalkPhase): AgentMessage[] {
+function buildContextMessages(messages: AgentMessage[], phase: PrewalkPhase, useBeads: boolean): AgentMessage[] {
 	const filtered = structuredClone(messages).filter(
 		(message) => !(message.role === "custom" && message.customType.startsWith(CONTROL_MESSAGE_PREFIX)),
 	);
 	const instruction =
 		phase === "planning"
-			? { customType: PLANNING_MESSAGE_TYPE, content: PLANNING_INSTRUCTION }
+			? { customType: PLANNING_MESSAGE_TYPE, content: useBeads ? BEADS_PLANNING_INSTRUCTION : PLANNING_INSTRUCTION }
 			: phase === "implementing"
-				? { customType: IMPLEMENTATION_MESSAGE_TYPE, content: VERIFICATION_INSTRUCTION }
+				? {
+						customType: IMPLEMENTATION_MESSAGE_TYPE,
+						content: useBeads ? BEADS_VERIFICATION_INSTRUCTION : VERIFICATION_INSTRUCTION,
+					}
 				: undefined;
 
 	if (!instruction) return filtered;
@@ -390,6 +405,17 @@ function buildContextMessages(messages: AgentMessage[], phase: PrewalkPhase): Ag
 			timestamp: Date.now(),
 		},
 	];
+}
+
+async function hasBeadsWorkspace(pi: ExtensionAPI, cwd: string): Promise<boolean> {
+	try {
+		const result = await pi.exec("bd", ["-C", cwd, "--readonly", "--json", "status", "--no-activity"], {
+			timeout: 5_000,
+		});
+		return result.code === 0;
+	} catch {
+		return false;
+	}
 }
 
 function isTextOnlyCompletion(message: AgentMessage): boolean {

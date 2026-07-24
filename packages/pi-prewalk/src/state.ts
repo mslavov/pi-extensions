@@ -8,7 +8,7 @@ export interface PrewalkState {
 }
 
 export interface PrewalkRunState {
-	todoGateOpen: boolean;
+	trackingGateOpen: boolean;
 	toolCalls: RecordedToolCall[];
 	nextOrdinal: number;
 	continuationCount: number;
@@ -18,6 +18,7 @@ export interface PrewalkRunState {
 export interface ToolCallSummary {
 	toolCallId: string;
 	toolName: string;
+	input?: unknown;
 }
 
 export interface ToolResultSummary {
@@ -35,7 +36,7 @@ export type ValidationResult = { ok: true } | { ok: false; reason: string };
 
 type RecordedToolCall = {
 	toolCallId: string;
-	kind: "todo" | "mutation";
+	kind: "tracking" | "mutation";
 	ordinal: number;
 };
 
@@ -44,14 +45,16 @@ const TODO_STATUSES = new Set(["pending", "in_progress", "completed"]);
 
 export const MUTATION_TOOL_NAMES: ReadonlySet<string> = new Set(MUTATION_TOOLS);
 
-export function validateArmingTools(activeTools: readonly string[]): ValidationResult {
-	const missingTodo = !activeTools.includes("todo_write");
+export function validateArmingTools(activeTools: readonly string[], useBeads = false): ValidationResult {
+	const missingTracking = useBeads
+		? !activeTools.some((toolName) => toolName === "bash" || toolName === "exec_command")
+		: !activeTools.includes("todo_write");
 	const missingMutation = !activeTools.some((toolName) => MUTATION_TOOL_NAMES.has(toolName));
 
-	if (!missingTodo && !missingMutation) return { ok: true };
+	if (!missingTracking && !missingMutation) return { ok: true };
 
 	const requirements: string[] = [];
-	if (missingTodo) requirements.push("the active todo_write tool");
+	if (missingTracking) requirements.push(useBeads ? "an active shell tool (bash or exec_command)" : "the active todo_write tool");
 	if (missingMutation) requirements.push("an active mutation tool (edit, write, or apply_patch)");
 
 	return {
@@ -83,7 +86,7 @@ export function validateTodoWriteInput(input: unknown): ValidationResult {
 
 export function createRunState(): PrewalkRunState {
 	return {
-		todoGateOpen: false,
+		trackingGateOpen: false,
 		toolCalls: [],
 		nextOrdinal: 0,
 		continuationCount: 0,
@@ -99,10 +102,14 @@ export function beginTurn(state: PrewalkRunState): PrewalkRunState {
 	};
 }
 
-export function recordToolCall(state: PrewalkRunState, call: ToolCallSummary): PrewalkRunState {
+export function recordToolCall(state: PrewalkRunState, call: ToolCallSummary, useBeads = false): PrewalkRunState {
 	const ordinal = state.nextOrdinal;
 	const nextState = { ...state, nextOrdinal: ordinal + 1 };
-	const kind = call.toolName === "todo_write" ? "todo" : MUTATION_TOOL_NAMES.has(call.toolName) ? "mutation" : undefined;
+	const kind = isTrackingCall(call, useBeads)
+		? "tracking"
+		: MUTATION_TOOL_NAMES.has(call.toolName)
+			? "mutation"
+			: undefined;
 
 	if (!kind) return nextState;
 
@@ -118,16 +125,16 @@ export function reduceTurn(
 	options: { allowContinuation?: boolean } = {},
 ): TurnDecision {
 	const successfulIds = new Set(results.filter((result) => !result.isError).map((result) => result.toolCallId));
-	const successfulTodos = state.toolCalls.filter(
-		(call) => call.kind === "todo" && successfulIds.has(call.toolCallId),
+	const successfulTracking = state.toolCalls.filter(
+		(call) => call.kind === "tracking" && successfulIds.has(call.toolCallId),
 	);
 	const successfulMutations = state.toolCalls.filter(
 		(call) => call.kind === "mutation" && successfulIds.has(call.toolCallId),
 	);
 
-	const shouldHandoff = state.todoGateOpen
+	const shouldHandoff = state.trackingGateOpen
 		? successfulMutations.length > 0
-		: successfulMutations.some((mutation) => successfulTodos.some((todo) => todo.ordinal < mutation.ordinal));
+		: successfulMutations.some((mutation) => successfulTracking.some((tracking) => tracking.ordinal < mutation.ordinal));
 
 	let continuationArmed = results.some((result) => !result.isError) || state.continuationArmed;
 	let continuationCount = state.continuationCount;
@@ -147,7 +154,7 @@ export function reduceTurn(
 
 	return {
 		state: {
-			todoGateOpen: state.todoGateOpen || successfulTodos.length > 0,
+			trackingGateOpen: state.trackingGateOpen || successfulTracking.length > 0,
 			toolCalls: [],
 			nextOrdinal: 0,
 			continuationCount,
@@ -156,6 +163,14 @@ export function reduceTurn(
 		shouldHandoff,
 		shouldContinue,
 	};
+}
+
+function isTrackingCall(call: ToolCallSummary, useBeads: boolean): boolean {
+	if (!useBeads) return call.toolName === "todo_write";
+	if (call.toolName !== "bash" && call.toolName !== "exec_command") return false;
+	if (!isRecord(call.input)) return false;
+	const command = call.input.command ?? call.input.cmd;
+	return typeof command === "string" && /(?:^|[;&|({}\s])bd\b(?=[^;&|]*\b(?:create|new|q|update|close|done|link|dep|reopen|assign|priority|tag|label|note|comment|edit|set-state)\b)/.test(command);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

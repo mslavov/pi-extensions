@@ -73,6 +73,7 @@ function createHarness(
 		models?: any[];
 		authenticated?: boolean;
 		idle?: boolean;
+		beads?: boolean;
 		mode?: "tui" | "rpc" | "json" | "print";
 	} = {},
 ) {
@@ -128,6 +129,12 @@ function createHarness(
 	});
 	const sendMessage = vi.fn();
 	const sendUserMessage = vi.fn();
+	const exec = vi.fn(async () => ({
+		stdout: options.beads ? "{}" : "",
+		stderr: "",
+		code: options.beads ? 0 : 1,
+		killed: false,
+	}));
 
 	const pi = {
 		on: vi.fn((event: string, handler: Handler) => {
@@ -136,7 +143,8 @@ function createHarness(
 			handlers.set(event, eventHandlers);
 		}),
 		registerCommand: vi.fn((name: string, command: any) => commands.set(name, command)),
-		getActiveTools: vi.fn(() => options.activeTools ?? ["read", "todo_write", "edit", "write"]),
+		getActiveTools: vi.fn(() => options.activeTools ?? ["read", "bash", "todo_write", "edit", "write"]),
+		exec,
 		getThinkingLevel: vi.fn(() => thinkingLevel),
 		setThinkingLevel,
 		setModel,
@@ -156,6 +164,7 @@ function createHarness(
 		setThinkingLevel,
 		sendMessage,
 		sendUserMessage,
+		exec,
 		waitForIdle,
 		get currentModel() {
 			return currentModel;
@@ -302,6 +311,45 @@ describe("/prewalk commands", () => {
 });
 
 describe("planning gate and context", () => {
+	it("detects a Beads workspace and hands off after Beads tracking", async () => {
+		const harness = createHarness({ beads: true });
+		await startPlanning(harness);
+
+		expect(harness.exec).toHaveBeenCalledWith(
+			"bd",
+			["-C", "C:/work", "--readonly", "--json", "status", "--no-activity"],
+			{ timeout: 5_000 },
+		);
+		const planning = await contextMessages(harness, []);
+		expect(planning.at(-1)?.content).toContain("Use the beads skill and direct bd CLI commands");
+		expect(planning.at(-1)?.content).toContain("Do not call todo_write");
+
+		await harness.emit("turn_start", { type: "turn_start", turnIndex: 0, timestamp: Date.now() });
+		await harness.emit("tool_call", {
+			type: "tool_call",
+			toolCallId: "beads",
+			toolName: "bash",
+			input: { command: "bd create --title 'Implement feature' --type task" },
+		});
+		await harness.emit("tool_call", {
+			type: "tool_call",
+			toolCallId: "mutation",
+			toolName: "edit",
+			input: { path: "src/index.ts", oldText: "a", newText: "b" },
+		});
+		await harness.emit("turn_end", {
+			type: "turn_end",
+			turnIndex: 0,
+			message: assistant("toolUse"),
+			toolResults: [toolResult("beads", "bash"), toolResult("mutation", "edit")],
+		});
+
+		expect(harness.setModel).toHaveBeenCalledWith(targetModel);
+		const implementing = await contextMessages(harness, []);
+		expect(implementing.at(-1)?.content).toContain("close the completed Bead");
+		expect(implementing.at(-1)?.content).toContain("instead of todo_write");
+	});
+
 	it("blocks invalid planning checklists before the todo tool executes", async () => {
 		const harness = createHarness();
 		await startPlanning(harness);

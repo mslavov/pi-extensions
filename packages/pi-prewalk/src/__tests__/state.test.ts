@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { MAX_AUTOMATIC_CONTINUATIONS, PLANNING_INSTRUCTION, VERIFICATION_INSTRUCTION } from "../prompts.js";
+import {
+	BEADS_PLANNING_INSTRUCTION,
+	BEADS_VERIFICATION_INSTRUCTION,
+	MAX_AUTOMATIC_CONTINUATIONS,
+	PLANNING_INSTRUCTION,
+	VERIFICATION_INSTRUCTION,
+} from "../prompts.js";
 import {
 	beginTurn,
 	createRunState,
@@ -23,6 +29,10 @@ function call(state: PrewalkRunState, toolCallId: string, toolName: string): Pre
 	return recordToolCall(state, { toolCallId, toolName });
 }
 
+function beadsCall(state: PrewalkRunState, toolCallId: string, command: string): PrewalkRunState {
+	return recordToolCall(state, { toolCallId, toolName: "bash", input: { command } }, true);
+}
+
 function ok(toolCallId: string): ToolResultSummary {
 	return { toolCallId, isError: false };
 }
@@ -34,6 +44,14 @@ function error(toolCallId: string): ToolResultSummary {
 describe("arming validation", () => {
 	it.each(["edit", "write", "apply_patch"])("accepts todo_write with %s", (mutationTool) => {
 		expect(validateArmingTools(["read", "todo_write", mutationTool])).toEqual({ ok: true });
+	});
+
+	it("requires a shell tool instead of todo_write for Beads tracking", () => {
+		expect(validateArmingTools(["bash", "edit"], true)).toEqual({ ok: true });
+		expect(validateArmingTools(["todo_write", "edit"], true)).toEqual({
+			ok: false,
+			reason: "Prewalk requires an active shell tool (bash or exec_command).",
+		});
 	});
 
 	it("reports each missing capability", () => {
@@ -88,8 +106,25 @@ describe("todo_write validation", () => {
 });
 
 describe("turn reduction", () => {
+	it("accepts a successful Beads update as the tracking gate", () => {
+		let state = createRunState();
+		state = beadsCall(state, "beads", "bd create --title 'Implement parser' --type task");
+		state = call(state, "mutation", "edit");
+
+		expect(reduceTurn(state, [ok("beads"), ok("mutation")]).shouldHandoff).toBe(true);
+	});
+
+	it("ignores read-only and unrelated shell commands for the Beads gate", () => {
+		let state = createRunState();
+		state = beadsCall(state, "status", "bd status");
+		state = beadsCall(state, "git", "git status");
+		state = call(state, "mutation", "edit");
+
+		expect(reduceTurn(state, [ok("status"), ok("git"), ok("mutation")]).shouldHandoff).toBe(false);
+	});
+
 	it("hands off after an open gate and a successful mutation", () => {
-		let state = { ...createRunState(), todoGateOpen: true };
+		let state = { ...createRunState(), trackingGateOpen: true };
 		state = call(state, "mutation", "edit");
 
 		expect(reduceTurn(state, [ok("mutation")]).shouldHandoff).toBe(true);
@@ -104,7 +139,7 @@ describe("turn reduction", () => {
 		const decision = reduceTurn(state, [ok("mutation"), ok("todo"), ok("read")]);
 
 		expect(decision.shouldHandoff).toBe(true);
-		expect(decision.state.todoGateOpen).toBe(true);
+		expect(decision.state.trackingGateOpen).toBe(true);
 	});
 
 	it("uses call order rather than parallel result order", () => {
@@ -123,7 +158,7 @@ describe("turn reduction", () => {
 
 		const firstTurn = reduceTurn(state, [ok("todo"), ok("early-mutation")]);
 		expect(firstTurn.shouldHandoff).toBe(false);
-		expect(firstTurn.state.todoGateOpen).toBe(true);
+		expect(firstTurn.state.trackingGateOpen).toBe(true);
 
 		state = call(beginTurn(firstTurn.state), "later-mutation", "edit");
 		expect(reduceTurn(state, [ok("later-mutation")]).shouldHandoff).toBe(true);
@@ -136,11 +171,11 @@ describe("turn reduction", () => {
 
 		const failedTodo = reduceTurn(state, [error("todo"), ok("mutation")]);
 		expect(failedTodo.shouldHandoff).toBe(false);
-		expect(failedTodo.state.todoGateOpen).toBe(false);
+		expect(failedTodo.state.trackingGateOpen).toBe(false);
 
 		const failedMutation = reduceTurn(state, [ok("todo"), error("mutation")]);
 		expect(failedMutation.shouldHandoff).toBe(false);
-		expect(failedMutation.state.todoGateOpen).toBe(true);
+		expect(failedMutation.state.trackingGateOpen).toBe(true);
 
 		state = call(beginTurn(failedMutation.state), "retry", "write");
 		expect(reduceTurn(state, [ok("retry")]).shouldHandoff).toBe(true);
@@ -197,7 +232,7 @@ describe("bounded planning continuations", () => {
 	});
 
 	it("does not queue a continuation when the turn qualifies for handoff", () => {
-		let state = { ...createRunState(), todoGateOpen: true };
+		let state = { ...createRunState(), trackingGateOpen: true };
 		state = call(state, "mutation", "edit");
 
 		const decision = reduceTurn(state, [ok("mutation")]);
@@ -226,5 +261,11 @@ describe("phase prompts", () => {
 		expect(VERIFICATION_INSTRUCTION).toContain("existing todo_write checklist");
 		expect(VERIFICATION_INSTRUCTION).toContain("limited to the requested scope");
 		expect(VERIFICATION_INSTRUCTION).toContain("full relevant test module or suite");
+	});
+
+	it("uses Beads instead of todo_write when a workspace is configured", () => {
+		expect(BEADS_PLANNING_INSTRUCTION).toContain("direct bd CLI commands");
+		expect(BEADS_PLANNING_INSTRUCTION).toContain("Do not call todo_write");
+		expect(BEADS_VERIFICATION_INSTRUCTION).toContain("close the completed Bead");
 	});
 });

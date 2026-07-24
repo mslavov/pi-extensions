@@ -8,10 +8,10 @@ After the run settles, Pi restores the original planner model and thinking level
 
 - `@earendil-works/pi-coding-agent` 0.80.10 or newer
 - An authenticated target model (Luna by default)
-- An active `todo_write` tool from [`pi-todo-write`](../pi-todo-write/)
+- An active `todo_write` tool from [`pi-todo-write`](../pi-todo-write/), or an active shell tool when the current working directory has a Beads workspace
 - At least one active mutation tool: `edit`, `write`, or `apply_patch`
 
-Prewalk refuses to arm and names the missing capability when these tools are unavailable.
+When `/prewalk` is armed, it checks the current working directory with `bd status`. A configured Beads workspace makes Beads the task tracker for that run; otherwise Prewalk uses `todo_write`. Prewalk refuses to arm and names the missing capability when the selected tracker or mutation tools are unavailable.
 
 ## Commands
 
@@ -27,15 +27,15 @@ Prewalk refuses to arm and names the missing capability when these tools are una
 ## Lifecycle
 
 1. The planner writes a concrete prose plan.
-2. The planner calls `todo_write` with 5–9 items, exactly one `in_progress` item, and validation represented in the checklist.
-3. The planner performs one focused successful `edit`, `write`, or `apply_patch` after the checklist gate opens.
+2. The planner records the task and validation work. It uses direct `bd` CLI commands to create or claim and start a Bead when Beads is configured, or calls `todo_write` with 5–9 items and exactly one `in_progress` item otherwise.
+3. The planner performs one focused successful `edit`, `write`, or `apply_patch` after the task-tracking gate opens.
 4. At that turn boundary, Pi switches to the configured target model.
-5. The target model completes the existing checklist and runs the full relevant test module.
+5. The target model completes and closes the existing Bead, or completes the existing checklist, and runs the full relevant test module.
 6. Once the agent run has fully settled, Pi restores the planner model and thinking level.
 
-Tool-call order controls the handoff even when tools execute in parallel: a checklist followed by a mutation can qualify in the same turn, while a mutation before the checklist cannot. Failed checklist or mutation calls do not qualify. If the planner stops after prose or partial tool progress, Prewalk can queue a bounded hidden continuation, with a maximum of three per run.
+Tool-call order controls the handoff even when tools execute in parallel: a successful Beads task update or todo checklist followed by a mutation can qualify in the same turn, while a mutation before task tracking cannot. Failed tracking or mutation calls do not qualify. If the planner stops after prose or partial tool progress, Prewalk can queue a bounded hidden continuation, with a maximum of three per run.
 
-The handoff does not fork, summarize, or replace the session. Planning guidance and implementation guidance are transient context messages; user messages, assistant responses, todo results, mutations, and verification results remain in one Pi trajectory.
+The handoff does not fork, summarize, or replace the session. Planning guidance and implementation guidance are transient context messages; user messages, assistant responses, task-tracking results, mutations, and verification results remain in one Pi trajectory.
 
 ## Configuration
 
