@@ -2613,7 +2613,7 @@ function setupSocketServer() {
 			}
 		});
 		socket.on("close", () => {
-			// Stale sweep archives dead sessions after a grace period, so reloads can reconnect.
+			// Session closure is explicit; disconnected clients may reconnect after sleep or network loss.
 			void writeStatus();
 		});
 		socket.on("error", (error) => void log(`socket error: ${errorMessage(error)}`));
@@ -2636,13 +2636,14 @@ async function removeStaleSocket() {
 
 function sweepStaleSessions() {
 	const cutoff = now() - SESSION_STALE_MS;
+	let changed = false;
 	for (const [sessionId, session] of sessions) {
 		if (session.lastSeen < cutoff || !session.socket.writable) {
 			sessions.delete(sessionId);
-			void archiveSessionChannel(sessionId, "stale", { notify: false }).catch((error) => log(`stale close failed: ${errorMessage(error)}`));
+			changed = true;
 		}
 	}
-	void writeStatus();
+	if (changed) void writeStatus();
 }
 
 async function handleSlackError(error) {

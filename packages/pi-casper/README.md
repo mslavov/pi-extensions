@@ -90,6 +90,7 @@ Check status with:
 - Slack reserves leading `/` text for registered slash commands. Use `/casper status`, `/casper casper-status`, `/casper compact`, `/casper stop`, `/casper reload`, or `/casper skill:name ...` after installing the manifest.
 - Without reinstalling the Slack command, use normal channel text aliases such as `casper status`, `casper compact`, `casper stop`, `casper reload`, or `!casper status`.
 - Slack requires a Request URL on slash-command definitions even for Socket Mode apps. The manifest includes an HTTPS placeholder URL; Socket Mode command payloads are delivered to Casper over the WebSocket.
+- Transient broker disconnects, including host sleep, leave the mapped channel open for reconnection.
 - When a local session closes, Casper archives its Slack channel.
 - If a session is resumed later, Casper attempts to reuse and unarchive the mapped channel.
 
