@@ -250,22 +250,36 @@ describe("bounded planning continuations", () => {
 });
 
 describe("phase prompts", () => {
-	it("requires the planned checklist and first-mutation sequence", () => {
-		expect(PLANNING_INSTRUCTION).toContain("concrete prose implementation plan");
-		expect(PLANNING_INSTRUCTION).toContain("5-9 specific items");
-		expect(PLANNING_INSTRUCTION).toContain("Exactly one item must be in_progress");
-		expect(PLANNING_INSTRUCTION).toContain("full conversation, checklist result, and first mutation result");
+	it("requires repository exploration, detailed tasks, and immediate implementation", () => {
+		expect(PLANNING_INSTRUCTION).toContain("Explore the repository thoroughly");
+		expect(PLANNING_INSTRUCTION).toContain("affected files and symbols");
+		expect(PLANNING_INSTRUCTION).toContain("5-9 detailed implementation tasks");
+		expect(PLANNING_INSTRUCTION).toContain("Start implementing immediately");
 	});
 
 	it("requires focused completion and full verification", () => {
-		expect(VERIFICATION_INSTRUCTION).toContain("existing todo_write checklist");
+		expect(VERIFICATION_INSTRUCTION).toContain("existing todo_write checklist in task order");
 		expect(VERIFICATION_INSTRUCTION).toContain("limited to the requested scope");
 		expect(VERIFICATION_INSTRUCTION).toContain("full relevant test module or suite");
 	});
 
-	it("uses Beads instead of todo_write when a workspace is configured", () => {
+	it("creates and executes a dependency-aware Beads task graph", () => {
 		expect(BEADS_PLANNING_INSTRUCTION).toContain("direct bd CLI commands");
-		expect(BEADS_PLANNING_INSTRUCTION).toContain("Do not call todo_write");
-		expect(BEADS_VERIFICATION_INSTRUCTION).toContain("close the completed Bead");
+		expect(BEADS_PLANNING_INSTRUCTION).toContain("Create detailed Beads tasks");
+		expect(BEADS_PLANNING_INSTRUCTION).toContain("add dependencies");
+		expect(BEADS_PLANNING_INSTRUCTION).toContain("while honoring their dependencies");
+		expect(BEADS_VERIFICATION_INSTRUCTION).toContain("Honor task dependencies");
+		expect(BEADS_VERIFICATION_INSTRUCTION).toContain("close each completed Bead");
+	});
+
+	it("does not expose orchestration details", () => {
+		const instructions = [
+			PLANNING_INSTRUCTION,
+			VERIFICATION_INSTRUCTION,
+			BEADS_PLANNING_INSTRUCTION,
+			BEADS_VERIFICATION_INSTRUCTION,
+		].join("\n");
+
+		expect(instructions).not.toMatch(/\b(?:handoff|model|trajectory)\b|planning phase|next request|first mutation/i);
 	});
 });

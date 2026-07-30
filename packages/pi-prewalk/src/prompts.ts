@@ -4,28 +4,28 @@ export const IMPLEMENTATION_MESSAGE_TYPE = `${CONTROL_MESSAGE_PREFIX}implementat
 export const CONTINUATION_MESSAGE_TYPE = `${CONTROL_MESSAGE_PREFIX}continuation`;
 export const MAX_AUTOMATIC_CONTINUATIONS = 3;
 
-export const PLANNING_INSTRUCTION = `You are in the Prewalk planning phase. Use the current strong model to establish the implementation path and begin it before handoff.
+export const PLANNING_INSTRUCTION = `Explore the repository thoroughly and determine the complete work required for the user's request.
 
 Follow this order:
-1. Inspect the relevant code and constraints.
-2. Write a concrete prose implementation plan in your assistant response.
-3. Call todo_write with 5-9 specific items. Exactly one item must be in_progress, and the checklist must include the relevant validation work.
-4. After the checklist succeeds, make exactly one focused first mutation with edit, write, or apply_patch. Do not make a mutation before the checklist and do not continue broad implementation in that turn.
+1. Inspect the relevant source, tests, configuration, documentation, and constraints.
+2. Determine the full implementation scope, affected files and symbols, risks, and verification required.
+3. Call todo_write with 5-9 detailed implementation tasks in execution order. Include validation work and mark exactly one ready task in_progress.
+4. Start implementing immediately. Work through the checklist in order, keep task statuses current, run the relevant validation, and continue until the request is complete.
 
-The next model request will receive the full conversation, checklist result, and first mutation result. Do not delegate, fork, summarize, or start a separate session.`;
+Keep the implementation focused on the requested scope and revise the checklist when repository evidence changes the plan.`;
 
-export const VERIFICATION_INSTRUCTION = `Continue the existing implementation from the full Prewalk trajectory. Follow and update the existing todo_write checklist rather than replanning from scratch. Keep the change consistent with the first mutation and limited to the requested scope. Complete every remaining item, run the full relevant test module or suite rather than only selected tests, resolve failures, and report the verification performed.`;
+export const VERIFICATION_INSTRUCTION = `Continue implementing the existing todo_write checklist in task order. Keep statuses current, complete every remaining item, and keep the changes limited to the requested scope. Run the full relevant test module or suite, resolve failures, and report the verification performed.`;
 
-export const BEADS_PLANNING_INSTRUCTION = `You are in the Prewalk planning phase. Use the current strong model to establish the implementation path and begin it before handoff.
+export const BEADS_PLANNING_INSTRUCTION = `Explore the repository thoroughly and determine the complete work required for the user's request.
 
-Beads is configured in the current working directory. Use the beads skill and direct bd CLI commands for task tracking instead of todo_write. The pi-beads extension is display-only.
+Use the beads skill and direct bd CLI commands for task tracking. Track the work with Beads instead of todo_write.
 
 Follow this order:
-1. Inspect the relevant code and constraints.
-2. Write a concrete prose implementation plan in your assistant response.
-3. Use bd to create or claim the task, include validation in its acceptance criteria or notes, and mark it in_progress. Do not call todo_write.
-4. After the Beads command succeeds, make exactly one focused first mutation with edit, write, or apply_patch. Do not make a mutation before updating Beads and do not continue broad implementation in that turn.
+1. Inspect the relevant source, tests, configuration, documentation, and constraints.
+2. Determine the full implementation scope, affected files and symbols, risks, and verification required.
+3. Create detailed Beads tasks for all implementation and validation work. Give each task a concrete scope and acceptance criteria, add dependencies that represent the required execution order, and mark the first ready task in_progress.
+4. Start implementing immediately. Work through ready Beads while honoring their dependencies, keep task statuses current, validate each completed task, and continue until every task for the request is complete.
 
-The next model request will receive the full conversation, Beads command result, and first mutation result. Do not delegate, fork, summarize, or start a separate session.`;
+Keep the implementation focused on the requested scope and update the Beads graph when repository evidence changes the plan.`;
 
-export const BEADS_VERIFICATION_INSTRUCTION = `Continue the existing implementation from the full Prewalk trajectory. Use the existing Beads task instead of todo_write and keep its status current with direct bd CLI commands. Keep the change consistent with the first mutation and limited to the requested scope. Complete the task, run the full relevant test module or suite rather than only selected tests, resolve failures, close the completed Bead with a reason, and report the verification performed.`;
+export const BEADS_VERIFICATION_INSTRUCTION = `Continue implementing the existing Beads task graph. Honor task dependencies, work through ready Beads in execution order, and keep their statuses current with direct bd CLI commands instead of todo_write. Validate and close each completed Bead, keep the changes limited to the requested scope, run the full relevant test module or suite, resolve failures, and continue until every task is complete.`;

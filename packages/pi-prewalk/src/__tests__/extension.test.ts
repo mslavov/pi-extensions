@@ -322,7 +322,7 @@ describe("planning gate and context", () => {
 		);
 		const planning = await contextMessages(harness, []);
 		expect(planning.at(-1)?.content).toContain("Use the beads skill and direct bd CLI commands");
-		expect(planning.at(-1)?.content).toContain("Do not call todo_write");
+		expect(planning.at(-1)?.content).toContain("instead of todo_write");
 
 		await harness.emit("turn_start", { type: "turn_start", turnIndex: 0, timestamp: Date.now() });
 		await harness.emit("tool_call", {
@@ -346,7 +346,7 @@ describe("planning gate and context", () => {
 
 		expect(harness.setModel).toHaveBeenCalledWith(targetModel);
 		const implementing = await contextMessages(harness, []);
-		expect(implementing.at(-1)?.content).toContain("close the completed Bead");
+		expect(implementing.at(-1)?.content).toContain("close each completed Bead");
 		expect(implementing.at(-1)?.content).toContain("instead of todo_write");
 	});
 
